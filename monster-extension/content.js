@@ -1,4 +1,4 @@
-// ---- Piece → FEN mapping (unchanged) ----
+// ---- Piece mapping to FEN ----
 const pieceMap = {
   'br': 'r', 'bn': 'n', 'bb': 'b', 'bq': 'q', 'bk': 'k', 'bp': 'p',
   'wr': 'R', 'wn': 'N', 'wb': 'B', 'wq': 'Q', 'wk': 'K', 'wp': 'P'
@@ -40,32 +40,6 @@ function getFEN() {
   return fen;
 }
 
-// ---- Persistent connection to background ----
-let port = chrome.runtime.connect({ name: 'chess' });
-
-port.onMessage.addListener(msg => {
-  if (msg.move) showOverlay(msg.move);
-});
-
-port.onDisconnect.addListener(() => {
-  // Reconnect if the background script restarts
-  setTimeout(() => {
-    port = chrome.runtime.connect({ name: 'chess' });
-    port.onMessage.addListener(msg => {
-      if (msg.move) showOverlay(msg.move);
-    });
-    updateMove(); // trigger update after reconnect
-  }, 1000);
-});
-
-function sendFenToBackground(fen) {
-    try {
-        port.postMessage({ type: 'getMove', fen: fen, time: 0.5 });
-    } catch (e) {
-        console.warn('Failed to send message, will retry');
-    }
-}
-
 // ---- Overlay ----
 function showOverlay(text) {
   let overlay = document.getElementById('monster-overlay');
@@ -88,14 +62,27 @@ function showOverlay(text) {
   overlay.childNodes[0].textContent = 'Best move: ' + text;
 }
 
-// ---- Update move ----
+// ---- Main update function ----
 async function updateMove() {
-  const fen = getFEN();
-  sendFenToBackground(fen);
+  try {
+    const fen = getFEN();
+    chrome.runtime.sendMessage({ type: 'getMove', fen, time: 0.5 }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('Message error:', chrome.runtime.lastError.message);
+        showOverlay('Error (retrying…)');
+        return;
+      }
+      if (response && response.move) {
+        showOverlay(response.move);
+      }
+    });
+  } catch (e) {
+    console.error('MonsterGambit updateMove error:', e);
+  }
 }
 
-// ---- Observer + polling ----
+// ---- Start immediately and keep watching ----
 updateMove();
 const observer = new MutationObserver(updateMove);
 observer.observe(document.body, { childList: true, subtree: true });
-setInterval(updateMove, 2000);
+setInterval(updateMove, 2000);  // fallback polling every 2s
