@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "MonsterGambit Live",
+  "version": "1.0",
+  "description": "Show Stockfish's best move on chess.com",
+  "permissions": ["activeTab"],
+  "host_permissions": ["http://127.0.0.1:5000/*"],
+  "content_scripts": [
+    {
+      "matches": ["*://*.chess.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ]
+}
