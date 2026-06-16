@@ -59,11 +59,11 @@ port.onDisconnect.addListener(() => {
 });
 
 function sendFenToBackground(fen) {
-  try {
-    port.postMessage({ type: 'getMove', fen });
-  } catch (e) {
-    console.warn('Failed to send message, will retry');
-  }
+    try {
+        port.postMessage({ type: 'getMove', fen: fen + "&time=0.5" }); // faster analysis
+    } catch (e) {
+        console.warn('Failed to send message, will retry');
+    }
 }
 
 // ---- Overlay ----
