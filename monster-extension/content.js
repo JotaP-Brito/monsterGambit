@@ -60,7 +60,7 @@ port.onDisconnect.addListener(() => {
 
 function sendFenToBackground(fen) {
     try {
-        port.postMessage({ type: 'getMove', fen: fen + "&time=0.5" }); // faster analysis
+        port.postMessage({ type: 'getMove', fen: fen, time: 0.5 });
     } catch (e) {
         console.warn('Failed to send message, will retry');
     }
