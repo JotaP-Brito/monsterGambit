@@ -1,10 +1,13 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS          # <-- NEW
 import subprocess
 import chess
 
 app = Flask(__name__)
-STOCKFISH_PATH = "./engines/stockfish/stockfish-windows-x86-64-avx2.exe"
+CORS(app)                            # <-- NEW: allow all origins for all routes
 
+STOCKFISH_PATH = "./engines/stockfish/stockfish-windows-x86-64-avx2.exe"
+# ... rest of your code remains identical ...
 def send(engine, cmd):
     engine.stdin.write(cmd + "\n")
     engine.stdin.flush()
