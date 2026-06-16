@@ -5,8 +5,10 @@ chrome.runtime.onConnect.addListener(port => {
   console.log('Content script connected');
   port.onMessage.addListener(async (request) => {
     if (request.type === 'getMove') {
+      const time = request.time || 0.5;
+      const url = `${STOCKFISH_URL}?fen=${encodeURIComponent(request.fen)}&time=${time}`;
       try {
-        const response = await fetch(`${STOCKFISH_URL}?fen=${encodeURIComponent(request.fen)}`);
+        const response = await fetch(url);
         const data = await response.json();
         port.postMessage({ move: data.san || '?' });
       } catch (err) {
