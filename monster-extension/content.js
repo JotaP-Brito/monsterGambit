@@ -1,4 +1,4 @@
-// Map piece classes → FEN letters
+// ---- Piece → FEN mapping (unchanged) ----
 const pieceMap = {
   'br': 'r', 'bn': 'n', 'bb': 'b', 'bq': 'q', 'bk': 'k', 'bp': 'p',
   'wr': 'R', 'wn': 'N', 'wb': 'B', 'wq': 'Q', 'wk': 'K', 'wp': 'P'
@@ -40,17 +40,33 @@ function getFEN() {
   return fen;
 }
 
-async function updateMove() {
+// ---- Persistent connection to background ----
+let port = chrome.runtime.connect({ name: 'chess' });
+
+port.onMessage.addListener(msg => {
+  if (msg.move) showOverlay(msg.move);
+});
+
+port.onDisconnect.addListener(() => {
+  // Reconnect if the background script restarts
+  setTimeout(() => {
+    port = chrome.runtime.connect({ name: 'chess' });
+    port.onMessage.addListener(msg => {
+      if (msg.move) showOverlay(msg.move);
+    });
+    updateMove(); // trigger update after reconnect
+  }, 1000);
+});
+
+function sendFenToBackground(fen) {
   try {
-    const fen = getFEN();
-    const response = await chrome.runtime.sendMessage({ type: 'getMove', fen });
-    showOverlay(response.move);
-  } catch (err) {
-    console.error('MonsterGambit error:', err);
-    showOverlay('Error');
+    port.postMessage({ type: 'getMove', fen });
+  } catch (e) {
+    console.warn('Failed to send message, will retry');
   }
 }
 
+// ---- Overlay ----
 function showOverlay(text) {
   let overlay = document.getElementById('monster-overlay');
   if (!overlay) {
@@ -72,7 +88,13 @@ function showOverlay(text) {
   overlay.childNodes[0].textContent = 'Best move: ' + text;
 }
 
-// Initial call + observer + polling
+// ---- Update move ----
+async function updateMove() {
+  const fen = getFEN();
+  sendFenToBackground(fen);
+}
+
+// ---- Observer + polling ----
 updateMove();
 const observer = new MutationObserver(updateMove);
 observer.observe(document.body, { childList: true, subtree: true });
