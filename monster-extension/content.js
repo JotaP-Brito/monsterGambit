@@ -1,102 +1,79 @@
-// Map piece classes to FEN letters
+// Map piece classes → FEN letters
 const pieceMap = {
-    'br': 'r', 'bn': 'n', 'bb': 'b', 'bq': 'q', 'bk': 'k', 'bp': 'p',
-    'wr': 'R', 'wn': 'N', 'wb': 'B', 'wq': 'Q', 'wk': 'K', 'wp': 'P'
+  'br': 'r', 'bn': 'n', 'bb': 'b', 'bq': 'q', 'bk': 'k', 'bp': 'p',
+  'wr': 'R', 'wn': 'N', 'wb': 'B', 'wq': 'Q', 'wk': 'K', 'wp': 'P'
 };
 
 function getFEN() {
-    const board = [];
-    for (let row = 0; row < 8; row++) {
-        board[row] = [];
-        for (let col = 0; col < 8; col++) {
-            board[row][col] = null;
-        }
+  const board = Array.from({ length: 8 }, () => Array(8).fill(null));
+  document.querySelectorAll('.piece').forEach(piece => {
+    const classes = piece.className.split(' ');
+    let pieceClass = classes.find(c => pieceMap[c]);
+    if (!pieceClass) return;
+    const squareClass = classes.find(c => c.startsWith('square-'));
+    if (!squareClass) return;
+    const square = squareClass.replace('square-', '');
+    const col = parseInt(square[0]) - 1;
+    const row = 8 - parseInt(square[1]);
+    board[row][col] = pieceMap[pieceClass];
+  });
+
+  let fen = '';
+  for (let row = 0; row < 8; row++) {
+    let empty = 0;
+    for (let col = 0; col < 8; col++) {
+      if (board[row][col] === null) empty++;
+      else {
+        if (empty > 0) { fen += empty; empty = 0; }
+        fen += board[row][col];
+      }
     }
+    if (empty > 0) fen += empty;
+    if (row < 7) fen += '/';
+  }
 
-    // Find all piece elements
-    const pieces = document.querySelectorAll('.piece');
-    pieces.forEach(piece => {
-        // Get piece color and type from class, e.g. "piece br square-11"
-        const classes = piece.className.split(' ');
-        let pieceClass = '';
-        for (const cls of classes) {
-            if (pieceMap[cls]) {
-                pieceClass = cls;
-                break;
-            }
-        }
-        if (!pieceClass) return;
-
-        // Find square class (e.g. "square-11")
-        const squareClass = classes.find(c => c.startsWith('square-'));
-        if (!squareClass) return;
-        const square = squareClass.replace('square-', '');
-        const col = parseInt(square[0]) - 1; // 1-indexed
-        const row = 8 - parseInt(square[1]);  // 8th rank is row 0
-        board[row][col] = pieceMap[pieceClass];
-    });
-
-    // Build FEN piece placement
-    let fen = '';
-    for (let row = 0; row < 8; row++) {
-        let empty = 0;
-        for (let col = 0; col < 8; col++) {
-            if (board[row][col] === null) {
-                empty++;
-            } else {
-                if (empty > 0) {
-                    fen += empty;
-                    empty = 0;
-                }
-                fen += board[row][col];
-            }
-        }
-        if (empty > 0) fen += empty;
-        if (row < 7) fen += '/';
-    }
-
-    // Determine active color from clock indicators
-    const whiteActive = document.querySelector('.clock-white.clock-active') !== null;
-    const blackActive = document.querySelector('.clock-black.clock-active') !== null;
-    let activeColor = 'w';
-    if (blackActive && !whiteActive) activeColor = 'b';
-    // Simplified: assume no castling/en passant – still gives correct move
-    fen += ` ${activeColor} KQkq - 0 1`;
-
-    return fen;
+  const whiteActive = document.querySelector('.clock-white.clock-active');
+  const blackActive = document.querySelector('.clock-black.clock-active');
+  let active = 'w';
+  if (blackActive && !whiteActive) active = 'b';
+  fen += ` ${active} KQkq - 0 1`;
+  return fen;
 }
 
-async function fetchBestMove(fen) {
-    const response = await fetch(`http://127.0.0.1:5000/bestmove?fen=${encodeURIComponent(fen)}`);
-    const data = await response.json();
-    return data.san || '?';
-}
-
-function showOverlay(move) {
-    // Remove old overlay if any
-    const old = document.getElementById('monster-overlay');
-    if (old) old.remove();
-
-    const overlay = document.createElement('div');
-    overlay.id = 'monster-overlay';
-    overlay.style.position = 'fixed';
-    overlay.style.bottom = '20px';
-    overlay.style.right = '20px';
-    overlay.style.background = 'rgba(0,0,0,0.8)';
-    overlay.style.color = '#fff';
-    overlay.style.padding = '10px 20px';
-    overlay.style.borderRadius = '8px';
-    overlay.style.fontSize = '24px';
-    overlay.style.zIndex = 9999;
-    overlay.textContent = 'Best move: ' + move;
-    document.body.appendChild(overlay);
-}
-
-// Watch for changes (new moves)
-const observer = new MutationObserver(async () => {
+async function updateMove() {
+  try {
     const fen = getFEN();
-    const move = await fetchBestMove(fen);
-    showOverlay(move);
-});
+    const response = await chrome.runtime.sendMessage({ type: 'getMove', fen });
+    showOverlay(response.move);
+  } catch (err) {
+    console.error('MonsterGambit error:', err);
+    showOverlay('Error');
+  }
+}
 
+function showOverlay(text) {
+  let overlay = document.getElementById('monster-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'monster-overlay';
+    overlay.style.cssText = `
+      position:fixed; bottom:20px; right:20px; background:rgba(0,0,0,0.85); color:#fff;
+      padding:12px 24px; border-radius:8px; font-size:22px; z-index:9999;
+      display:flex; align-items:center; gap:12px;
+    `;
+    const btn = document.createElement('button');
+    btn.textContent = '🔄';
+    btn.style.cssText = 'background:#4CAF50; border:none; color:white; padding:5px 12px; border-radius:4px; cursor:pointer;';
+    btn.onclick = updateMove;
+    overlay.appendChild(document.createTextNode(''));
+    overlay.appendChild(btn);
+    document.body.appendChild(overlay);
+  }
+  overlay.childNodes[0].textContent = 'Best move: ' + text;
+}
+
+// Initial call + observer + polling
+updateMove();
+const observer = new MutationObserver(updateMove);
 observer.observe(document.body, { childList: true, subtree: true });
+setInterval(updateMove, 2000);
