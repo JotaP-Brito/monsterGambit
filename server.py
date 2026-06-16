@@ -1,75 +1,78 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS          # <-- NEW
 import subprocess
 import chess
+import threading
 
 app = Flask(__name__)
-CORS(app)                            # <-- NEW: allow all origins for all routes
-
 STOCKFISH_PATH = "./engines/stockfish/stockfish-windows-x86-64-avx2.exe"
-# ... rest of your code remains identical ...
-def send(engine, cmd):
-    engine.stdin.write(cmd + "\n")
-    engine.stdin.flush()
 
-def read_line(engine):
-    return engine.stdout.readline().strip()
+# ---- Persistent engine ----
+engine = None
+engine_lock = threading.Lock()
 
-def get_best_move(fen):
-    engine = subprocess.Popen(
-        STOCKFISH_PATH,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-        bufsize=1
-    )
-    try:
+def get_engine():
+    """Return the global engine, starting it if necessary."""
+    global engine
+    if engine is None:
+        engine = subprocess.Popen(
+            STOCKFISH_PATH,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1
+        )
         # UCI handshake
-        send(engine, "uci")
+        engine.stdin.write("uci\n"); engine.stdin.flush()
         while True:
-            line = read_line(engine)
+            line = engine.stdout.readline().strip()
             if line == "uciok":
                 break
-
-        send(engine, "isready")
+        engine.stdin.write("isready\n"); engine.stdin.flush()
         while True:
-            line = read_line(engine)
+            line = engine.stdout.readline().strip()
             if line == "readyok":
                 break
+    return engine
 
-        # Set position and go
-        send(engine, f"position fen {fen}")
-        send(engine, "go movetime 1500")
+def get_best_move(fen, movetime=1.0):
+    """
+    Send a position to the persistent engine and get the best move.
+    movetime is in seconds (float).
+    """
+    eng = get_engine()
+    # Send position and go command
+    eng.stdin.write(f"position fen {fen}\n")
+    eng.stdin.write(f"go movetime {int(movetime * 1000)}\n")
+    eng.stdin.flush()
 
-        best_move = None
-        while True:
-            line = read_line(engine)
-            if line.startswith("bestmove"):
-                best_move = line.split()[1]
-                break
-
-        return best_move
-    finally:
-        # Always clean up
-        try:
-            send(engine, "quit")
-            engine.terminate()
-            engine.wait(timeout=2)
-        except:
-            engine.kill()
+    best_move = None
+    while True:
+        line = eng.stdout.readline().strip()
+        if line.startswith("bestmove"):
+            best_move = line.split()[1]
+            break
+    return best_move
 
 @app.route("/bestmove")
 def bestmove():
     fen = request.args.get("fen")
     if not fen:
-        return jsonify({"error": "No FEN provided"}), 400
-    # Support "startpos" shortcut
+        return jsonify({"error": "No FEN"}), 400
     if fen.lower() == "startpos":
         fen = chess.STARTING_FEN
+
+    # Allow optional "time" parameter (seconds, default 1.0)
     try:
-        board = chess.Board(fen)  # validate
-        move = get_best_move(fen)
+        movetime = float(request.args.get("time", 1.0))
+        movetime = max(0.1, min(movetime, 10.0))   # clamp between 0.1 and 10 seconds
+    except:
+        movetime = 1.0
+
+    try:
+        board = chess.Board(fen)
+        with engine_lock:   # ensure only one thread talks to the engine at a time
+            move = get_best_move(fen, movetime)
         san = board.san(chess.Move.from_uci(move))
         return jsonify({"uci": move, "san": san})
     except Exception as e:
@@ -80,4 +83,6 @@ def health():
     return "OK", 200
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    # Start engine before first request
+    get_engine()
+    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
