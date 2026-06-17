@@ -10,7 +10,6 @@ function isFlipped() {
 }
 
 function getFEN() {
-  // ... (same FEN logic as before, with flipped support) ...
   const board = Array.from({ length: 8 }, () => Array(8).fill(null));
   const flipped = isFlipped();
   document.querySelectorAll('.piece').forEach(piece => {
@@ -49,6 +48,57 @@ function getFEN() {
   return fen;
 }
 
+// ---- Humanized move selector ----
+function parseScore(scoreStr) {
+  // "M1", "M-3", "+0.34", "-0.56"
+  if (scoreStr.startsWith('M')) {
+    // Mate scores: treat as extreme values (mate in 1 = 100, mate in N = 100-N)
+    const mateIn = parseInt(scoreStr.slice(1));
+    return mateIn > 0 ? 100 - mateIn : -100 - mateIn; // mate in favor is positive
+  }
+  return parseFloat(scoreStr) || 0;
+}
+
+function selectHumanMove(moves) {
+  if (!moves || moves.length === 0) return -1;
+  if (moves.length === 1) return 0;   // only one move
+
+  // Convert scores to numbers
+  const scores = moves.map(m => parseScore(m.score));
+  const bestScore = scores[0];
+
+  // If the best move is a forced mate, always suggest it (humans do see mates)
+  if (moves[0].score.startsWith('M') && bestScore > 50) return 0;
+
+  // Collect candidates within 0.3 pawns of the best
+  const threshold = 0.3;
+  const candidates = [];
+  for (let i = 0; i < scores.length; i++) {
+    if (bestScore - scores[i] <= threshold) {
+      candidates.push(i);
+    }
+  }
+
+  // Occasionally (15% chance) include the second move even if it's slightly worse,
+  // but only if it's not a blunder (not worse than -1.0)
+  if (Math.random() < 0.15 && scores.length > 1 && bestScore - scores[1] <= 1.0) {
+    if (!candidates.includes(1)) candidates.push(1);
+  }
+
+  // If no candidates (e.g., huge gap), fallback to the first move
+  if (candidates.length === 0) return 0;
+
+  // Weighted random selection: probability proportional to score (higher = more likely)
+  const totalWeight = candidates.reduce((sum, idx) => sum + Math.max(scores[idx] + 1, 0.1), 0);
+  let rand = Math.random() * totalWeight;
+  for (const idx of candidates) {
+    const weight = Math.max(scores[idx] + 1, 0.1);
+    rand -= weight;
+    if (rand <= 0) return idx;
+  }
+  return candidates[0]; // fallback
+}
+
 // ---- Rich Overlay ----
 function createOverlay() {
   let overlay = document.getElementById('monster-overlay');
@@ -62,13 +112,12 @@ function createOverlay() {
     padding: 16px; border-radius: 12px;
     font-family: 'Segoe UI', Arial, sans-serif;
     z-index: 9999;
-    min-width: 220px;
+    min-width: 240px;
     box-shadow: 0 4px 15px rgba(0,0,0,0.6);
     backdrop-filter: blur(5px);
     border: 1px solid rgba(255,255,255,0.1);
   `;
 
-  // Header
   const header = document.createElement('div');
   header.style.cssText = 'font-size: 14px; font-weight: bold; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;';
   header.innerHTML = '<span>🧠 MonsterGambit</span>';
@@ -80,7 +129,6 @@ function createOverlay() {
   header.appendChild(refreshBtn);
   overlay.appendChild(header);
 
-  // Moves container
   const movesDiv = document.createElement('div');
   movesDiv.id = 'monster-moves';
   movesDiv.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
@@ -90,7 +138,7 @@ function createOverlay() {
   return overlay;
 }
 
-function updateMovesDisplay(moves) {
+function updateMovesDisplay(moves, chosenIndex) {
   const movesDiv = document.getElementById('monster-moves');
   if (!movesDiv) return;
 
@@ -102,7 +150,13 @@ function updateMovesDisplay(moves) {
 
   moves.forEach((move, index) => {
     const row = document.createElement('div');
-    row.style.cssText = 'display: flex; align-items: center; gap: 10px;';
+    row.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 4px 8px; border-radius: 6px;';
+
+    // Highlight the human suggestion
+    if (index === chosenIndex) {
+      row.style.background = 'rgba(76,175,80,0.2)';
+      row.style.border = '1px solid #4CAF50';
+    }
 
     // Rank badge
     const badge = document.createElement('span');
@@ -113,21 +167,28 @@ function updateMovesDisplay(moves) {
     `;
     row.appendChild(badge);
 
+    // Suggestion star
+    if (index === chosenIndex) {
+      const star = document.createElement('span');
+      star.textContent = '✅';
+      star.style.cssText = 'font-size: 16px;';
+      row.appendChild(star);
+    }
+
     // Move notation
     const moveText = document.createElement('span');
     moveText.textContent = move.san;
-    moveText.style.cssText = 'font-size: 18px; font-weight: 600; color: #fff;';
+    moveText.style.cssText = `font-size: 18px; font-weight: ${index === chosenIndex ? '700' : '500'}; color: #fff;`;
     row.appendChild(moveText);
 
     // Score
     const scoreSpan = document.createElement('span');
     scoreSpan.textContent = move.score;
     scoreSpan.style.cssText = 'font-size: 14px; color: #aaa; margin-left: auto;';
-    // Color code score
     if (move.score.startsWith('+') || move.score.startsWith('M')) {
-      scoreSpan.style.color = '#4CAF50'; // green for positive/forced mate
+      scoreSpan.style.color = '#4CAF50';
     } else if (move.score.startsWith('-')) {
-      scoreSpan.style.color = '#f44336'; // red for negative
+      scoreSpan.style.color = '#f44336';
     }
     row.appendChild(scoreSpan);
 
@@ -158,22 +219,19 @@ async function doUpdate() {
   lastFEN = fen;
 
   requestInFlight = true;
-  // Ensure overlay exists
   createOverlay();
-  updateMovesDisplay([{ san: '…', score: '' }]); // thinking indicator
+  updateMovesDisplay([{ san: '…', score: '' }], -1);
 
   chrome.runtime.sendMessage({ type: 'getMove', fen, time: 0.5, multipv: 3 }, (response) => {
     requestInFlight = false;
     if (chrome.runtime.lastError) {
       console.warn('MonsterGambit message error:', chrome.runtime.lastError.message);
-      updateMovesDisplay([{ san: '⚠ Extension error', score: '' }]);
+      updateMovesDisplay([{ san: '⚠ Extension error', score: '' }], -1);
       return;
     }
-    if (response && response.moves) {
-      updateMovesDisplay(response.moves);
-    } else {
-      updateMovesDisplay([{ san: '⚠ No data', score: '' }]);
-    }
+    const moves = response?.moves || [];
+    const chosenIndex = selectHumanMove(moves);
+    updateMovesDisplay(moves, chosenIndex);
   });
 }
 
