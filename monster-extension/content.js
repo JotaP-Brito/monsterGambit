@@ -10,8 +10,8 @@ let autoPlayTimeout = null;
 let selectedMove = null;
 let thinkingStart = null;
 let lastFEN = null;
-let lastMoveTime = 0;
 
+// ---- Orientation ----
 function isFlipped() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
   return board && board.classList.contains('flipped');
@@ -21,13 +21,55 @@ function isUserWhite() {
   return !isFlipped();
 }
 
+// ---- Active color detection (multiple layers) ----
+function getActiveColor() {
+  // 1) chess-board element may have a fen attribute
+  const boardEl = document.querySelector('chess-board');
+  if (boardEl) {
+    const fenAttr = boardEl.getAttribute('fen') || boardEl.getAttribute('data-fen');
+    if (fenAttr) {
+      const parts = fenAttr.split(' ');
+      if (parts.length >= 2) return parts[1];
+    }
+  }
+
+  // 2) Global chess.com game object
+  const game = boardEl?.game || boardEl?.chess || window.chess;
+  if (game && game.turn) {
+    return game.turn(); // returns 'w' or 'b'
+  }
+
+  // 3) Clock: the side whose clock is not paused and not zero
+  const clocks = document.querySelectorAll('.clock-white, .clock-black, [class*="clock"]');
+  for (const clock of clocks) {
+    const isWhite = clock.classList.contains('clock-white') || clock.classList.contains('player-bottom') || clock.classList.contains('bottom-clock');
+    const isBlack = clock.classList.contains('clock-black') || clock.classList.contains('player-top') || clock.classList.contains('top-clock');
+    if (!isWhite && !isBlack) continue;
+    // If clock has "clock-active" class, it's running (older chess.com)
+    if (clock.classList.contains('clock-active')) {
+      return isWhite ? 'w' : 'b';
+    }
+    // If clock contains a running timer (the time text is changing), we can't easily detect that.
+  }
+
+  // 4) Fallback: look at the last move indicator (the glowing square). The side that just moved is the opposite.
+  const lastMoveSquares = document.querySelectorAll('.highlight, .last-move, [class*="last-move"]');
+  if (lastMoveSquares.length > 0) {
+    // The side that just moved is the one whose pieces moved. Hard to deduce.
+  }
+
+  return null; // uncertain
+}
+
 function isUserTurn() {
   const fen = getFEN();
   if (!fen) return false;
-  const activeColor = fen.split(' ')[1];
-  return (isUserWhite() && activeColor === 'w') || (!isUserWhite() && activeColor === 'b');
+  const activeColor = getActiveColor() || fen.split(' ')[1]; // fallback to FEN's active color
+  const userIsWhite = isUserWhite();
+  return (userIsWhite && activeColor === 'w') || (!userIsWhite && activeColor === 'b');
 }
 
+// ---- FEN builder ----
 function getFEN() {
   const board = Array.from({ length: 8 }, () => Array(8).fill(null));
   const flipped = isFlipped();
@@ -59,24 +101,19 @@ function getFEN() {
     if (empty > 0) fen += empty;
     if (row < 7) fen += '/';
   }
-  // Active color detection: find the clock that is running (chess.com adds a "clock-running" class or similar)
-  const runningClock = document.querySelector('.clock-running, [class*="clock"][class*="running"]');
-  let active = 'w';
-  if (runningClock) {
-    active = runningClock.classList.contains('clock-white') || runningClock.classList.contains('player-top') ? 'w' : 'b';
-  } else {
-    // fallback: check which clock is not paused
-    const whiteClock = document.querySelector('.clock-white');
-    const blackClock = document.querySelector('.clock-black');
-    if (whiteClock && blackClock) {
-      active = whiteClock.classList.contains('clock-active') ? 'w' : 'b';
-    }
+  // Active color via getActiveColor; if uncertain, default to FEN's own detection from clock classes (as before)
+  let active = getActiveColor();
+  if (!active) {
+    const whiteActive = document.querySelector('.clock-white.clock-active, [class*="clock"][class*="white"][class*="active"]');
+    const blackActive = document.querySelector('.clock-black.clock-active, [class*="clock"][class*="black"][class*="active"]');
+    active = 'w';
+    if (blackActive && !whiteActive) active = 'b';
   }
   fen += ` ${active} - - 0 1`;
   return fen;
 }
 
-// ---- Humanized move selector ----
+// ---- Humanized move selector (unchanged) ----
 function parseScore(scoreStr) {
   if (scoreStr.startsWith('M')) {
     const mateIn = parseInt(scoreStr.slice(1));
@@ -149,7 +186,7 @@ function computeThinkTime(fen, evaluationScore) {
   return Math.round((baseMin + Math.random() * (baseMax - baseMin)) * 1000);
 }
 
-// ---- Move execution ----
+// ---- Move execution (unchanged) ----
 function getSquareCenter(square) {
   const file = square.charCodeAt(0) - 97;
   const rank = 8 - parseInt(square[1]);
@@ -172,7 +209,6 @@ function getSquareCenter(square) {
 async function tryBoardAPI(from, to) {
   const boardEl = document.querySelector('chess-board');
   if (!boardEl) return false;
-  // chess.com stores the Chess instance as boardEl.game or boardEl.chess or window.chess
   const chess = boardEl.game || boardEl.chess || window.chess;
   if (chess && typeof chess.move === 'function') {
     chess.move({ from, to, promotion: 'q' });
@@ -182,7 +218,6 @@ async function tryBoardAPI(from, to) {
 }
 
 async function tryTextInput(from, to) {
-  // chess.com's move input: hidden by default, becomes visible when you start typing
   const inputSelectors = [
     'input[class*="move"]',
     'input[placeholder*="move" i]',
@@ -196,7 +231,6 @@ async function tryTextInput(from, to) {
     if (input) break;
   }
   if (!input) return false;
-
   const move = from + to;
   input.focus();
   input.value = '';
@@ -204,7 +238,6 @@ async function tryTextInput(from, to) {
   await new Promise(r => setTimeout(r, 30));
   input.value = move;
   input.dispatchEvent(new Event('input', { bubbles: true }));
-  // Dispatch Enter key
   input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
   input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
   return true;
@@ -214,29 +247,19 @@ async function tryDragMove(from, to) {
   const fromPos = getSquareCenter(from);
   const toPos = getSquareCenter(to);
   if (!fromPos || !toPos) return false;
-
-  // Get the piece element at the source square (important for flipped boards)
   const piece = document.elementFromPoint(fromPos.x, fromPos.y);
   if (!piece) return false;
-
-  // Dispatch pointerdown on the piece
   piece.dispatchEvent(new PointerEvent('pointerdown', {
     bubbles: true, cancelable: true, view: window,
     clientX: fromPos.x, clientY: fromPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
-
   await new Promise(r => setTimeout(r, 30 + Math.random() * 70));
-
-  // Move to target square
   const targetSquare = document.elementFromPoint(toPos.x, toPos.y) || document.body;
   targetSquare.dispatchEvent(new PointerEvent('pointermove', {
     bubbles: true, cancelable: true, view: window,
     clientX: toPos.x, clientY: toPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
-
   await new Promise(r => setTimeout(r, 20));
-
-  // Release on target
   targetSquare.dispatchEvent(new PointerEvent('pointerup', {
     bubbles: true, cancelable: true, view: window,
     clientX: toPos.x, clientY: toPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
@@ -250,29 +273,21 @@ async function playMove(uci, displayText) {
   console.log(`MonsterGambit: playing ${from}→${to}`);
   updateStatus(`Playing ${displayText || uci}...`);
 
-  // 1. API call
   if (await tryBoardAPI(from, to)) {
     console.log('Move via board API');
     setTimeout(() => updateStatus(null), 2000);
     return;
   }
-
-  // 2. Text input
   if (await tryTextInput(from, to)) {
     console.log('Move via text input');
     setTimeout(() => updateStatus(null), 2000);
     return;
   }
-
-  // 3. Drag simulation
   console.log('Fallback to drag simulation');
   await tryDragMove(from, to);
-
-  // Verify move registered
   await new Promise(r => setTimeout(r, 500));
-  const newFen = getFEN();
-  if (lastFEN === newFen) {
-    console.log('Move not registered, retrying with API...');
+  if (lastFEN === getFEN()) {
+    console.log('Move not registered, retrying API...');
     await tryBoardAPI(from, to);
   }
   setTimeout(() => updateStatus(null), 2000);
@@ -294,6 +309,11 @@ function scheduleAutoPlay(moveUci, thinkTime, moveDisplay) {
   updateAutoPlayCountdown(thinkTime, moveDisplay);
   autoPlayTimeout = setTimeout(() => {
     if (selectedMove === moveUci) {
+      // Final safety check: still our turn?
+      if (!isUserTurn()) {
+        cancelAutoPlay('Not your turn anymore');
+        return;
+      }
       playMove(moveUci, moveDisplay);
       selectedMove = null;
       thinkingStart = null;
@@ -310,7 +330,7 @@ function cancelAutoPlay(reason) {
   selectedMove = null;
   thinkingStart = null;
   updateAutoPlayCountdown(null);
-  if (reason) updateStatus(`⚠ Auto‑play cancelled: ${reason}`);
+  if (reason) updateStatus(`⚠ Auto-play cancelled: ${reason}`);
 }
 
 function updateAutoPlayCountdown(delayMs, moveDisplay) {
@@ -355,11 +375,7 @@ function createOverlay() {
   const autoBtn = document.createElement('button');
   autoBtn.id = 'monster-autoplay-btn';
   autoBtn.textContent = autoPlayEnabled ? '🤖 Auto ON' : '🤖 Auto OFF';
-  autoBtn.title = 'Toggle auto‑play';
-  autoBtn.style.cssText = `
-    background: ${autoPlayEnabled ? '#4CAF50' : '#555'};
-    border: none; color: white; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 13px;
-  `;
+  autoBtn.style.cssText = `background: ${autoPlayEnabled ? '#4CAF50' : '#555'}; border: none; color: white; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 13px;`;
   autoBtn.onclick = (e) => {
     e.stopPropagation();
     autoPlayEnabled = !autoPlayEnabled;
@@ -371,11 +387,9 @@ function createOverlay() {
 
   const refreshBtn = document.createElement('button');
   refreshBtn.textContent = '🔄';
-  refreshBtn.title = 'Refresh analysis';
   refreshBtn.style.cssText = 'background: #2196F3; border: none; color: white; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 14px;';
   refreshBtn.onclick = (e) => { e.stopPropagation(); doUpdate(); };
   header.appendChild(refreshBtn);
-
   overlay.appendChild(header);
 
   const statusEl = document.createElement('div');
@@ -429,7 +443,6 @@ function updateMovesDisplay(moves, chosenIndex) {
     row.appendChild(scoreSpan);
     const playBtn = document.createElement('button');
     playBtn.textContent = '▶️ Play';
-    playBtn.title = 'Play this move manually';
     playBtn.style.cssText = 'background: #555; border: none; color: white; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 4px;';
     playBtn.onclick = (e) => {
       e.stopPropagation();
@@ -465,9 +478,7 @@ async function doUpdate() {
   if (fen === lastFEN) return;
   const previousFEN = lastFEN;
   lastFEN = fen;
-  lastMoveTime = Date.now();
 
-  // Cancel pending auto‑play if board changed (opponent moved)
   if (autoPlayTimeout && previousFEN) {
     cancelAutoPlay('Opponent moved');
   }
@@ -487,14 +498,15 @@ async function doUpdate() {
     const chosenIndex = selectHumanMove(moves, fen);
     updateMovesDisplay(moves, chosenIndex);
 
-    // Auto‑play if enabled and it's the user's turn
     if (autoPlayEnabled && chosenIndex >= 0 && isUserTurn()) {
       const selected = moves[chosenIndex];
       const evalScore = parseScore(selected.score);
       const thinkTime = computeThinkTime(fen, evalScore);
       scheduleAutoPlay(selected.uci, thinkTime, selected.san);
     } else {
-      cancelAutoPlay();
+      if (!isUserTurn()) {
+        cancelAutoPlay('Waiting for opponent');
+      }
     }
   });
 }
