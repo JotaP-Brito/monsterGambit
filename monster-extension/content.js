@@ -9,6 +9,8 @@ let autoPlayEnabled = false;
 let autoPlayTimeout = null;
 let selectedMove = null;
 let thinkingStart = null;
+let lastFEN = null;
+let lastMoveTime = 0;
 
 function isFlipped() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
@@ -21,6 +23,7 @@ function isUserWhite() {
 
 function isUserTurn() {
   const fen = getFEN();
+  if (!fen) return false;
   const activeColor = fen.split(' ')[1];
   return (isUserWhite() && activeColor === 'w') || (!isUserWhite() && activeColor === 'b');
 }
@@ -56,15 +59,24 @@ function getFEN() {
     if (empty > 0) fen += empty;
     if (row < 7) fen += '/';
   }
-  const whiteActive = document.querySelector('.clock-white.clock-active, [class*="clock"][class*="white"][class*="active"]');
-  const blackActive = document.querySelector('.clock-black.clock-active, [class*="clock"][class*="black"][class*="active"]');
+  // Active color detection: find the clock that is running (chess.com adds a "clock-running" class or similar)
+  const runningClock = document.querySelector('.clock-running, [class*="clock"][class*="running"]');
   let active = 'w';
-  if (blackActive && !whiteActive) active = 'b';
+  if (runningClock) {
+    active = runningClock.classList.contains('clock-white') || runningClock.classList.contains('player-top') ? 'w' : 'b';
+  } else {
+    // fallback: check which clock is not paused
+    const whiteClock = document.querySelector('.clock-white');
+    const blackClock = document.querySelector('.clock-black');
+    if (whiteClock && blackClock) {
+      active = whiteClock.classList.contains('clock-active') ? 'w' : 'b';
+    }
+  }
   fen += ` ${active} - - 0 1`;
   return fen;
 }
 
-// ---- Humanized move selector (unchanged) ----
+// ---- Humanized move selector ----
 function parseScore(scoreStr) {
   if (scoreStr.startsWith('M')) {
     const mateIn = parseInt(scoreStr.slice(1));
@@ -73,7 +85,7 @@ function parseScore(scoreStr) {
   return parseFloat(scoreStr) || 0;
 }
 
-function isNaturalMove(uci, fen) {
+function isNaturalMove(uci) {
   if (uci === 'e1g1' || uci === 'e1c1' || uci === 'e8g8' || uci === 'e8c8') return true;
   const from = uci.substring(0,2);
   const to = uci.substring(2,4);
@@ -97,7 +109,7 @@ function selectHumanMove(moves, fen) {
     if (!candidates.includes(1)) candidates.push(1);
   }
   for (let i = 0; i < moves.length; i++) {
-    if (bestScore - scores[i] <= 0.5 && isNaturalMove(moves[i].uci, fen)) {
+    if (bestScore - scores[i] <= 0.5 && isNaturalMove(moves[i].uci)) {
       if (!candidates.includes(i)) candidates.push(i);
     }
   }
@@ -137,7 +149,7 @@ function computeThinkTime(fen, evaluationScore) {
   return Math.round((baseMin + Math.random() * (baseMax - baseMin)) * 1000);
 }
 
-// ---- Move execution (multiple fallbacks) ----
+// ---- Move execution ----
 function getSquareCenter(square) {
   const file = square.charCodeAt(0) - 97;
   const rank = 8 - parseInt(square[1]);
@@ -157,99 +169,111 @@ function getSquareCenter(square) {
   return { x, y };
 }
 
-// Method 1: Use chessboard internal move()
-function tryBoardAPI(from, to) {
+async function tryBoardAPI(from, to) {
   const boardEl = document.querySelector('chess-board');
-  if (boardEl && typeof boardEl.move === 'function') {
-    boardEl.move(from, to);
-    return true;
-  }
-  if (boardEl && boardEl.board && typeof boardEl.board.move === 'function') {
-    boardEl.board.move(from, to);
+  if (!boardEl) return false;
+  // chess.com stores the Chess instance as boardEl.game or boardEl.chess or window.chess
+  const chess = boardEl.game || boardEl.chess || window.chess;
+  if (chess && typeof chess.move === 'function') {
+    chess.move({ from, to, promotion: 'q' });
     return true;
   }
   return false;
 }
 
-// Method 2: Type move into text input and press Enter
 async function tryTextInput(from, to) {
-  // chess.com has an input with class "move-input" or inside a chat panel
-  const input = document.querySelector('input.move-input, input[class*="move"], input[placeholder*="move"]');
+  // chess.com's move input: hidden by default, becomes visible when you start typing
+  const inputSelectors = [
+    'input[class*="move"]',
+    'input[placeholder*="move" i]',
+    'input[placeholder*="Move" i]',
+    '#move-input',
+    '.move-input'
+  ];
+  let input = null;
+  for (const sel of inputSelectors) {
+    input = document.querySelector(sel);
+    if (input) break;
+  }
   if (!input) return false;
-  const uciMove = from + to;
-  // Clear input and type the move
+
+  const move = from + to;
+  input.focus();
   input.value = '';
   input.dispatchEvent(new Event('input', { bubbles: true }));
-  await new Promise(r => setTimeout(r, 50));
-  input.value = uciMove;
+  await new Promise(r => setTimeout(r, 30));
+  input.value = move;
   input.dispatchEvent(new Event('input', { bubbles: true }));
-  // Press Enter
-  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-  input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+  // Dispatch Enter key
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
   return true;
 }
 
-// Method 3: Pointer events drag simulation
-async function tryPointerDrag(from, to) {
+async function tryDragMove(from, to) {
   const fromPos = getSquareCenter(from);
   const toPos = getSquareCenter(to);
   if (!fromPos || !toPos) return false;
-  const boardEl = document.querySelector('chess-board') || document.querySelector('.board') || document.body;
 
-  const pointerdown = new PointerEvent('pointerdown', {
+  // Get the piece element at the source square (important for flipped boards)
+  const piece = document.elementFromPoint(fromPos.x, fromPos.y);
+  if (!piece) return false;
+
+  // Dispatch pointerdown on the piece
+  piece.dispatchEvent(new PointerEvent('pointerdown', {
     bubbles: true, cancelable: true, view: window,
     clientX: fromPos.x, clientY: fromPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
-  });
-  boardEl.dispatchEvent(pointerdown);
+  }));
 
   await new Promise(r => setTimeout(r, 30 + Math.random() * 70));
 
-  const pointermove = new PointerEvent('pointermove', {
+  // Move to target square
+  const targetSquare = document.elementFromPoint(toPos.x, toPos.y) || document.body;
+  targetSquare.dispatchEvent(new PointerEvent('pointermove', {
     bubbles: true, cancelable: true, view: window,
     clientX: toPos.x, clientY: toPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
-  });
-  document.dispatchEvent(pointermove);
+  }));
 
   await new Promise(r => setTimeout(r, 20));
 
-  const pointerup = new PointerEvent('pointerup', {
+  // Release on target
+  targetSquare.dispatchEvent(new PointerEvent('pointerup', {
     bubbles: true, cancelable: true, view: window,
     clientX: toPos.x, clientY: toPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
-  });
-  boardEl.dispatchEvent(pointerup);
+  }));
   return true;
 }
 
 async function playMove(uci, displayText) {
   const from = uci.substring(0, 2);
   const to = uci.substring(2, 4);
-  console.log(`MonsterGambit: attempting ${from}→${to}`);
+  console.log(`MonsterGambit: playing ${from}→${to}`);
   updateStatus(`Playing ${displayText || uci}...`);
 
-  // Try board API first (fastest, most reliable)
-  if (tryBoardAPI(from, to)) {
+  // 1. API call
+  if (await tryBoardAPI(from, to)) {
     console.log('Move via board API');
     setTimeout(() => updateStatus(null), 2000);
     return;
   }
 
-  // Try text input
+  // 2. Text input
   if (await tryTextInput(from, to)) {
     console.log('Move via text input');
     setTimeout(() => updateStatus(null), 2000);
     return;
   }
 
-  // Try pointer drag
-  console.log('Fallback to pointer drag');
-  await tryPointerDrag(from, to);
+  // 3. Drag simulation
+  console.log('Fallback to drag simulation');
+  await tryDragMove(from, to);
 
-  // Wait and check if board changed (retry once if not)
+  // Verify move registered
   await new Promise(r => setTimeout(r, 500));
   const newFen = getFEN();
   if (lastFEN === newFen) {
-    console.log('Move may have failed, retrying with board API again...');
-    tryBoardAPI(from, to);
+    console.log('Move not registered, retrying with API...');
+    await tryBoardAPI(from, to);
   }
   setTimeout(() => updateStatus(null), 2000);
 }
@@ -262,7 +286,7 @@ function updateStatus(msg) {
   }
 }
 
-// ---- Auto-play scheduling ----
+// ---- Auto‑play scheduling ----
 function scheduleAutoPlay(moveUci, thinkTime, moveDisplay) {
   cancelAutoPlay();
   thinkingStart = Date.now();
@@ -286,7 +310,7 @@ function cancelAutoPlay(reason) {
   selectedMove = null;
   thinkingStart = null;
   updateAutoPlayCountdown(null);
-  if (reason) updateStatus(`⚠ Auto-play cancelled: ${reason}`);
+  if (reason) updateStatus(`⚠ Auto‑play cancelled: ${reason}`);
 }
 
 function updateAutoPlayCountdown(delayMs, moveDisplay) {
@@ -422,7 +446,6 @@ function updateMovesDisplay(moves, chosenIndex) {
 
 // ---- Debounced update ----
 let debounceTimer = null;
-let lastFEN = null;
 let requestInFlight = false;
 
 function scheduleUpdate(delay = 400) {
@@ -442,7 +465,9 @@ async function doUpdate() {
   if (fen === lastFEN) return;
   const previousFEN = lastFEN;
   lastFEN = fen;
+  lastMoveTime = Date.now();
 
+  // Cancel pending auto‑play if board changed (opponent moved)
   if (autoPlayTimeout && previousFEN) {
     cancelAutoPlay('Opponent moved');
   }
@@ -462,6 +487,7 @@ async function doUpdate() {
     const chosenIndex = selectHumanMove(moves, fen);
     updateMovesDisplay(moves, chosenIndex);
 
+    // Auto‑play if enabled and it's the user's turn
     if (autoPlayEnabled && chosenIndex >= 0 && isUserTurn()) {
       const selected = moves[chosenIndex];
       const evalScore = parseScore(selected.score);
