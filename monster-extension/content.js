@@ -14,8 +14,11 @@ let userColor = null;
 let colorLockedBy = null;
 let colorDetectionAttempts = 0;
 let requestInFlight = false;
+let requestTimer = null;
 let debounceTimer = null;
-let gameEndDetected = false;      // prevents repeated next‑game triggers
+let gameEndDetected = false;
+let observer = null;
+let lastForcedCheck = 0;
 
 // ---- Board orientation ----
 function isFlipped() {
@@ -50,7 +53,7 @@ function detectUserColorWithConfidence() {
       if (c === 'white') c = 'w';
       if (c === 'black') c = 'b';
       if (c === 'w' || c === 'b') return { color: c, confidence: 'high', source: 'gameObject' };
-    } catch (e) { }
+    } catch (e) {}
   }
   const boardEl = document.querySelector('chess-board') || document.querySelector('.board');
   if (boardEl) {
@@ -102,7 +105,7 @@ function ensureUserColor() {
   return userColor || 'w';
 }
 
-// ---- Active colour detection (fixed move‑list fallback) ----
+// ---- Active colour detection ----
 function getActiveColor() {
   const game = getGameObject();
   if (game && typeof game.turn === 'function') {
@@ -114,7 +117,7 @@ function getActiveColor() {
         console.log('MonsterGambit: active color via game.turn() =', t);
         return t;
       }
-    } catch (e) { }
+    } catch (e) {}
   }
 
   const highlights = document.querySelectorAll(
@@ -173,7 +176,7 @@ function isUserTurn() {
   return result;
 }
 
-// ---- Build FEN (no mirroring) ----
+// ---- Build FEN ----
 function getFEN() {
   const board = Array.from({ length: 8 }, () => Array(8).fill(null));
   document.querySelectorAll('.piece').forEach(piece => {
@@ -210,7 +213,7 @@ function getFEN() {
   return fen;
 }
 
-// ---- Humanized move selector (500 Elo edition) ----
+// ---- Humanized move selector (500 Elo) ----
 function parseScore(scoreStr) {
   if (!scoreStr) return 0;
   if (scoreStr.startsWith('M')) {
@@ -227,6 +230,7 @@ function selectHumanMove(moves, fen) {
   const bestScore = scores[0];
   if (moves[0].score?.startsWith('M') && bestScore > 50) return 0;
 
+  // 5% blunder chance
   if (Math.random() < 0.05) {
     let blunderIdx = -1;
     for (let i = scores.length - 1; i >= 0; i--) {
@@ -252,17 +256,33 @@ function selectHumanMove(moves, fen) {
   return 0;
 }
 
-// ---- Thinking time ----
+// ---- Thinking time (improved endgame) ----
 function countPieces(fen) { return fen.split(' ')[0].replace(/[\/0-9]/g, '').length; }
+
 function computeThinkTime(fen, evaluationScore) {
-  if (Math.random() < 0.15) return 300 + Math.random() * 500;
-  if (Math.random() < 0.05) return 8000 + Math.random() * 7000;
   const pieces = countPieces(fen);
+  const isEndgame = pieces <= 12;
+
+  // Quick-move chance is higher in endgames (simpler decisions)
+  if (Math.random() < (isEndgame ? 0.30 : 0.15)) {
+    return 300 + Math.random() * 400;
+  }
+
+  // Long "think" pauses are rare in endgames — fewer genuine decision points
+  if (!isEndgame && Math.random() < 0.05) {
+    return 8000 + Math.random() * 7000;
+  }
+
   let baseMin, baseMax;
-  if (pieces > 28) { baseMin = 1.0; baseMax = 4.0; }
+  if (pieces > 28)      { baseMin = 1.0; baseMax = 4.0; }
   else if (pieces > 12) { baseMin = 2.0; baseMax = 10.0; }
-  else { baseMin = 1.0; baseMax = 6.0; }
-  if (evaluationScore <= -2.0) { baseMin += 2; baseMax += 4; }
+  else                  { baseMin = 0.5; baseMax = 2.5; }  // endgame: much tighter range
+
+  if (evaluationScore <= -2.0 && !isEndgame) {
+    baseMin += 2;
+    baseMax += 4;
+  }
+
   return Math.round((baseMin + Math.random() * (baseMax - baseMin)) * 1000);
 }
 
@@ -291,7 +311,7 @@ async function tryBoardAPI(from, to) {
   if (!boardEl) return false;
   const chess = boardEl.game || boardEl.chess || window.chess;
   if (chess && typeof chess.move === 'function') {
-    try { chess.move({ from, to, promotion: 'q' }); return true; } catch (e) { }
+    try { chess.move({ from, to, promotion: 'q' }); return true; } catch (e) {}
   }
   return false;
 }
@@ -547,7 +567,7 @@ function updateMovesDisplay(moves, chosenIndex) {
   }
 }
 
-// ---- Debounced update ----
+// ---- Debounced update with stuck‑request recovery ----
 function scheduleUpdate(delay = 400) {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(doUpdate, delay);
@@ -555,14 +575,33 @@ function scheduleUpdate(delay = 400) {
 
 const thinkingMessages = ['Hmm…', 'Let’s see…', 'What to play?', 'Interesting position', 'Umm…'];
 
+function resetRequestFlag() {
+  requestInFlight = false;
+  if (requestTimer) { clearTimeout(requestTimer); requestTimer = null; }
+}
+
 async function doUpdate() {
-  if (requestInFlight) return;
+  if (requestInFlight) {
+    console.warn('MonsterGambit: update skipped – request already in flight');
+    return;
+  }
+
   ensureUserColor();
   updateOverlayTitle();
 
   let fen;
   try { fen = getFEN(); } catch (e) { console.error('MonsterGambit getFEN error:', e); return; }
-  if (fen === lastFEN) return;
+
+  const now = Date.now();
+  const forceUpdate = (now - lastForcedCheck > 5000) && isUserTurn();
+
+  if (fen === lastFEN && !forceUpdate) return;
+
+  if (forceUpdate) {
+    console.log('MonsterGambit: forced update because it’s our turn and 5s elapsed');
+  }
+
+  lastForcedCheck = now;
   const previousFEN = lastFEN;
   lastFEN = fen;
 
@@ -571,12 +610,25 @@ async function doUpdate() {
   }
 
   requestInFlight = true;
+  if (requestTimer) clearTimeout(requestTimer);
+  requestTimer = setTimeout(() => {
+    console.warn('MonsterGambit: request timed out – resetting');
+    resetRequestFlag();
+  }, 8000);
+
   createOverlay();
   updateMovesDisplay([{ san: '…', score: '' }], -1);
   updateStatus(thinkingMessages[Math.floor(Math.random() * thinkingMessages.length)]);
 
-  chrome.runtime.sendMessage({ type: 'getMove', fen, time: 0.5, multipv: 3 }, (response) => {
-    requestInFlight = false;
+  // In endgames (≤12 pieces), reduce analysis depth for speed
+  const pieces = countPieces(fen);
+  const isEndgame = pieces <= 12;
+  const analysisTime = isEndgame ? 0.3 : 0.5;
+  const multipv = isEndgame ? 1 : 3;   // fewer lines in endgame = faster
+
+  chrome.runtime.sendMessage({ type: 'getMove', fen, time: analysisTime, multipv }, (response) => {
+    resetRequestFlag();
+
     if (chrome.runtime.lastError) {
       console.warn('MonsterGambit message error:', chrome.runtime.lastError.message);
       updateMovesDisplay([{ san: '⚠ Extension error', score: '' }], -1);
@@ -605,14 +657,55 @@ async function doUpdate() {
   });
 }
 
-// ---- Game‑end detection & auto‑queue ----
+// ---- Game‑end detection & auto‑queue (improved) ----
+function checkGameEnd() {
+  // 1) Visible modals / overlays
+  const endSelectors = [
+    '.game-over-modal', '[class*="game-over"]', '.post-game-modal',
+    '[class*="post-game"]', '.result-modal', '[class*="result-modal"]',
+    '.game-review-modal', '[class*="game-review"]',
+    '.game-end-modal', '[class*="game-end"]'
+  ];
+  for (const sel of endSelectors) {
+    const el = document.querySelector(sel);
+    if (el && el.offsetParent !== null) return true;
+  }
+
+  // 2) Result text
+  const resultText = document.querySelector(
+    '.game-result, [class*="result"], .sidebar-result, .game-end-text, [class*="end-text"]'
+  );
+  if (resultText) {
+    const text = resultText.textContent?.toLowerCase() || '';
+    if (/\b(1\-0|0\-1|½\-½|won|drew|draw|resign|abandon|timeout|forfeit|stalemate|game over|game ended|won on time|white wins|black wins)\b/.test(text)) {
+      return true;
+    }
+  }
+
+  // 3) Review button
+  const reviewBtn = document.querySelector(
+    '[class*="game-review-button"], button[class*="review"], a[class*="review"]'
+  );
+  if (reviewBtn) return true;
+
+  // 4) Both clocks 0:00
+  const whiteClock = document.querySelector('.clock-white, [class*="clock-white"]');
+  const blackClock = document.querySelector('.clock-black, [class*="clock-black"]');
+  if (whiteClock && blackClock) {
+    const wt = whiteClock.textContent?.trim() || '';
+    const bt = blackClock.textContent?.trim() || '';
+    if ((wt === '0:00' || wt === '0.0') && (bt === '0:00' || bt === '0.0')) return true;
+  }
+
+  return false;
+}
+
 function tryStartNextGame() {
   if (gameEndDetected) return;
   gameEndDetected = true;
 
   console.log('MonsterGambit: Game ended – looking for next game button…');
 
-  // Look for a button that contains "10 min" or "10+0"
   const buttons = document.querySelectorAll('button, a, span[role="button"]');
   const targetTexts = ['10 min', '10+0', 'new 10', 'play again 10'];
 
@@ -627,7 +720,6 @@ function tryStartNextGame() {
     }
   }
 
-  // Fallback: click the generic "New Game" or "Play Again" button
   for (const btn of buttons) {
     const text = btn.textContent?.toLowerCase() || '';
     if (text.includes('new game') || text.includes('play again')) {
@@ -637,118 +729,44 @@ function tryStartNextGame() {
     }
   }
 
-  // Last resort: navigate to 10+0 challenge page
   console.log('MonsterGambit: no button found – navigating to 10+0 challenge');
   window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=rated';
 }
 
-function checkGameEnd() {
-  // Detect the post‑game modal or overlay
-  const endSelectors = [
-    '.game-over-modal',
-    '[class*="game-over"]',
-    '.post-game-modal',
-    '[class*="post-game"]',
-    '.result-modal',
-    '[class*="result-modal"]'
-  ];
-
-  for (const sel of endSelectors) {
-    const el = document.querySelector(sel);
-    if (el && el.offsetParent !== null) { // visible
-      return true;
-    }
+// Reset detection when a new game appears (board fully reset)
+function resetGameEndDetection() {
+  if (!gameEndDetected) return;
+  const pieces = document.querySelectorAll('.piece');
+  if (pieces.length >= 28) { // full starting position
+    console.log('MonsterGambit: new game detected – resetting auto-queue');
+    gameEndDetected = false;
   }
-
-  // Fallback: if both clocks show 0:00 or very low time and the board has no legal moves? (simpler: detect the result text)
-  const resultText = document.querySelector('.game-result, [class*="result"], .sidebar-result');
-  if (resultText && resultText.textContent?.match(/1-0|0-1|½-½|won|draw|resign/i)) {
-    return true;
-  }
-
-  return false;
 }
 
-// Watch for game end modal to appear
-function checkGameEnd() {
-  // ---- 1. Look for the post‑game modal or overlay (covers all endings) ----
-  const endSelectors = [
-    '.game-over-modal',
-    '[class*="game-over"]',
-    '.post-game-modal',
-    '[class*="post-game"]',
-    '.result-modal',
-    '[class*="result-modal"]',
-    '.game-review-modal',          // appears after every game
-    '[class*="game-review"]'
-  ];
-
-  for (const sel of endSelectors) {
-    const el = document.querySelector(sel);
-    if (el && el.offsetParent !== null) { // visible
-      return true;
+function startGameEndObserver() {
+  const obs = new MutationObserver(() => {
+    resetGameEndDetection();
+    if (checkGameEnd()) {
+      setTimeout(tryStartNextGame, 4000 + Math.random() * 3000);
     }
-  }
-
-  // ---- 2. Look for result text in sidebar or banner ----
-  const resultText = document.querySelector(
-    '.game-result, ' +
-    '[class*="result"], ' +
-    '.sidebar-result, ' +
-    '.game-end-text, ' +
-    '[class*="end-text"]'
-  );
-
-  if (resultText) {
-    const text = resultText.textContent?.toLowerCase() || '';
-    const patterns = [
-      /\b1\-0\b/, /\b0\-1\b/, /\b½\-½\b/,   // scores
-      /\bwon\b/, /\bdrew\b/, /\bdraw\b/,
-      /\bresign\b/, /\babandon\b/, /\btimeout\b/,
-      /\bforfeit\b/, /\bstalemate\b/,
-      /\bgame over\b/, /\bgame ended\b/,
-      /\bwon on time\b/, /\bwhite wins\b/, /\bblack wins\b/
-    ];
-
-    for (const pattern of patterns) {
-      if (pattern.test(text)) {
-        return true;
-      }
-    }
-  }
-
-  // ---- 3. Game review button (appears after every game) ----
-  const reviewBtn = document.querySelector(
-    '[class*="game-review-button"], ' +
-    'button[class*="review"], ' +
-    'a[class*="review"], ' +
-    'button:contains("Game Review"), ' +
-    'a:contains("Game Review")'
-  );
-  if (reviewBtn) return true;
-
-  // ---- 4. Both clocks showing 0:00 or game inactive ----
-  const whiteClock = document.querySelector('.clock-white, [class*="clock-white"]');
-  const blackClock = document.querySelector('.clock-black, [class*="clock-black"]');
-
-  if (whiteClock && blackClock) {
-    const whiteTime = whiteClock.textContent?.trim() || '';
-    const blackTime = blackClock.textContent?.trim() || '';
-
-    // If both show exactly "0:00" or "0.0" etc., game is over
-    if ((whiteTime === '0:00' || whiteTime === '0.0') &&
-      (blackTime === '0:00' || blackTime === '0.0')) {
-      return true;
-    }
-  }
-
-  return false;
+  });
+  obs.observe(document.body, { childList: true, subtree: true, attributes: true });
 }
+
 // ---- Observer for board changes ----
-function startObserver() {
+function ensureObserver() {
   const target = document.querySelector('chess-board') || document.querySelector('.board') || document.body;
-  const observer = new MutationObserver(() => scheduleUpdate(400));
+  if (!target) return;
+
+  if (observer) {
+    observer.disconnect();
+  }
+  observer = new MutationObserver(() => {
+    scheduleUpdate(400);
+    setTimeout(() => scheduleUpdate(0), 600);
+  });
   observer.observe(target, { childList: true, subtree: true, attributes: true });
+  console.log('MonsterGambit: observer attached to', target.tagName || 'body');
 }
 
 // ---- Init ----
@@ -757,6 +775,15 @@ colorDetectionAttempts = 0;
 gameEndDetected = false;
 
 scheduleUpdate(1500);
-startObserver();
-startGameEndObserver();     // 👈 new: auto‑queue next game
-setInterval(() => scheduleUpdate(0), 3000);
+ensureObserver();
+startGameEndObserver();
+
+// Reconnect observer every 10 seconds
+setInterval(() => {
+  ensureObserver();
+}, 10000);
+
+// Polling fallback every 3 seconds
+setInterval(() => {
+  scheduleUpdate(0);
+}, 3000);
