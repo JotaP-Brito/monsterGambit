@@ -7,8 +7,8 @@ const pieceMap = {
 // ---- Global state ----
 let autoPlayEnabled = false;
 let autoPlayTimeout = null;
-let selectedMove = null;       // the chosen UCI move to be played
-let thinkingStart = null;      // timestamp when thinking started (for countdown)
+let selectedMove = null;
+let thinkingStart = null;
 
 function isFlipped() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
@@ -16,7 +16,6 @@ function isFlipped() {
 }
 
 function isUserWhite() {
-  // If the board is flipped (we see black at bottom), the user is playing Black.
   return !isFlipped();
 }
 
@@ -65,7 +64,7 @@ function getFEN() {
   return fen;
 }
 
-// ---- Humanized move selector (improved) ----
+// ---- Humanized move selector (unchanged) ----
 function parseScore(scoreStr) {
   if (scoreStr.startsWith('M')) {
     const mateIn = parseInt(scoreStr.slice(1));
@@ -75,56 +74,38 @@ function parseScore(scoreStr) {
 }
 
 function isNaturalMove(uci, fen) {
-  // Define some human‑preferred moves:
-  // - Castling kingside/queenside
-  // - Developing a knight or bishop from the back rank
-  // - Recapturing on the same square where a piece was just taken (not implemented, simple version)
   if (uci === 'e1g1' || uci === 'e1c1' || uci === 'e8g8' || uci === 'e8c8') return true;
-  // Developing moves: piece from 1st rank (or 8th for black) to a non‑back rank
   const from = uci.substring(0,2);
   const to = uci.substring(2,4);
-  if ('abcdefgh'.indexOf(from[0]) !== -1 && from[1] === '1' && to[1] !== '1') return true; // white piece from rank 1
-  if ('abcdefgh'.indexOf(from[0]) !== -1 && from[1] === '8' && to[1] !== '8') return true; // black piece from rank 8
+  if ('abcdefgh'.indexOf(from[0]) !== -1 && from[1] === '1' && to[1] !== '1') return true;
+  if ('abcdefgh'.indexOf(from[0]) !== -1 && from[1] === '8' && to[1] !== '8') return true;
   return false;
 }
 
 function selectHumanMove(moves, fen) {
   if (!moves || moves.length === 0) return -1;
   if (moves.length === 1) return 0;
-
   const scores = moves.map(m => parseScore(m.score));
   const bestScore = scores[0];
-
-  // If forced mate, always suggest it (humans see obvious mates)
   if (moves[0].score.startsWith('M') && bestScore > 50) return 0;
 
-  // Collect candidates within 0.3 pawns of best
   const threshold = 0.3;
   const candidates = [];
   for (let i = 0; i < scores.length; i++) {
     if (bestScore - scores[i] <= threshold) candidates.push(i);
   }
-
-  // Occasionally (15%) include second move even if slightly worse (up to -1.0)
   if (Math.random() < 0.15 && scores.length > 1 && bestScore - scores[1] <= 1.0) {
     if (!candidates.includes(1)) candidates.push(1);
   }
-
-  // Boost natural moves: if a natural move is within 0.5 of best, add it
   for (let i = 0; i < moves.length; i++) {
     if (bestScore - scores[i] <= 0.5 && isNaturalMove(moves[i].uci, fen)) {
       if (!candidates.includes(i)) candidates.push(i);
     }
   }
-
-  // Occasionally (5%) deliberately choose a slightly worse but non‑terrible move (within -1.5)
   if (Math.random() < 0.05 && moves.length > 1 && bestScore - scores[1] <= 1.5) {
     if (!candidates.includes(1)) candidates.push(1);
   }
-
   if (candidates.length === 0) return 0;
-
-  // Weighted random selection
   const totalWeight = candidates.reduce((sum, idx) => sum + Math.max(scores[idx] + 1, 0.1), 0);
   let rand = Math.random() * totalWeight;
   for (const idx of candidates) {
@@ -135,10 +116,9 @@ function selectHumanMove(moves, fen) {
   return candidates[0];
 }
 
-// ---- Thinking time emulation ----
+// ---- Thinking time ----
 function countPieces(fen) {
-  const placement = fen.split(' ')[0];
-  return placement.replace(/[\/0-9]/g, '').length;
+  return fen.split(' ')[0].replace(/[\/0-9]/g, '').length;
 }
 
 function estimateComplexity(fen) {
@@ -151,28 +131,14 @@ function estimateComplexity(fen) {
 function computeThinkTime(fen, evaluationScore) {
   const phase = estimateComplexity(fen);
   let baseMin, baseMax;
-
-  // Base thinking time ranges (in seconds)
-  if (phase === 'opening') {
-    baseMin = 1.0; baseMax = 3.0;   // quick in opening (mostly theory)
-  } else if (phase === 'middlegame') {
-    baseMin = 2.0; baseMax = 8.0;   // longer in complex middlegame
-  } else {
-    baseMin = 1.0; baseMax = 5.0;   // endgame can be quick or slow
-  }
-
-  // Adjust for evaluation: if the position is very bad (<= -2), take longer
-  if (evaluationScore <= -2.0) {
-    baseMin += 1.5;
-    baseMax += 3.0;
-  }
-
-  // Add random jitter
-  const delay = baseMin + Math.random() * (baseMax - baseMin);
-  return Math.round(delay * 1000); // in milliseconds
+  if (phase === 'opening') { baseMin = 1.0; baseMax = 3.0; }
+  else if (phase === 'middlegame') { baseMin = 2.0; baseMax = 8.0; }
+  else { baseMin = 1.0; baseMax = 5.0; }
+  if (evaluationScore <= -2.0) { baseMin += 1.5; baseMax += 3.0; }
+  return Math.round((baseMin + Math.random() * (baseMax - baseMin)) * 1000);
 }
 
-// ---- Move execution ----
+// ---- Move execution with retry and feedback ----
 function getSquareCenter(square) {
   const file = square.charCodeAt(0) - 97;
   const rank = 8 - parseInt(square[1]);
@@ -192,7 +158,7 @@ function getSquareCenter(square) {
   return { x, y };
 }
 
-function simulateDragDrop(fromUci, toUci) {
+async function simulateDragDrop(fromUci, toUci) {
   const from = getSquareCenter(fromUci);
   const to = getSquareCenter(toUci);
   if (!from || !to) return false;
@@ -201,11 +167,14 @@ function simulateDragDrop(fromUci, toUci) {
     bubbles: true, cancelable: true, view: window,
     clientX: from.x, clientY: from.y, button: 0
   }));
+  // tiny delay to simulate human drag
+  await new Promise(r => setTimeout(r, 30 + Math.random() * 70));
   const moveEvent = new MouseEvent('mousemove', {
     bubbles: true, cancelable: true, view: window,
     clientX: to.x, clientY: to.y, button: 0
   });
   document.dispatchEvent(moveEvent);
+  await new Promise(r => setTimeout(r, 20));
   const targetEnd = document.elementFromPoint(to.x, to.y) || document.body;
   targetEnd.dispatchEvent(new MouseEvent('mouseup', {
     bubbles: true, cancelable: true, view: window,
@@ -214,51 +183,74 @@ function simulateDragDrop(fromUci, toUci) {
   return true;
 }
 
-function playMove(uci) {
+async function playMove(uci, displayText) {
   const from = uci.substring(0, 2);
   const to = uci.substring(2, 4);
-  console.log(`MonsterGambit: playing ${from} → ${to}`);
-  simulateDragDrop(from, to);
+  console.log(`MonsterGambit: attempting ${from}→${to}`);
+  updateStatus(`Playing ${displayText || uci}...`);
+  const success = await simulateDragDrop(from, to);
+  if (!success) {
+    updateStatus('❌ Move failed');
+  } else {
+    // Wait for board update to confirm move was accepted
+    await new Promise(r => setTimeout(r, 500));
+    // If the FEN hasn't changed, the move might not have registered; retry once
+    const newFen = getFEN();
+    if (lastFEN === newFen) {
+      console.log('Move may have failed, retrying...');
+      await simulateDragDrop(from, to);
+    }
+  }
+  // Clear status after a while
+  setTimeout(() => updateStatus(null), 2000);
+}
+
+function updateStatus(msg) {
+  const statusEl = document.getElementById('monster-status');
+  if (statusEl) {
+    statusEl.textContent = msg || '';
+    statusEl.style.display = msg ? 'block' : 'none';
+  }
 }
 
 // ---- Auto‑play scheduling ----
-function scheduleAutoPlay(moveUci, thinkTime) {
+function scheduleAutoPlay(moveUci, thinkTime, moveDisplay) {
   cancelAutoPlay();
   thinkingStart = Date.now();
   selectedMove = moveUci;
-  // Update overlay with countdown
-  updateThinkingIndicator(thinkTime);
+  updateAutoPlayCountdown(thinkTime, moveDisplay);
   autoPlayTimeout = setTimeout(() => {
-    if (selectedMove === moveUci) { // still same move planned
-      playMove(moveUci);
+    if (selectedMove === moveUci) {
+      playMove(moveUci, moveDisplay);
       selectedMove = null;
       thinkingStart = null;
+      updateAutoPlayCountdown(null);
     }
   }, thinkTime);
 }
 
-function cancelAutoPlay() {
+function cancelAutoPlay(reason) {
   if (autoPlayTimeout) {
     clearTimeout(autoPlayTimeout);
     autoPlayTimeout = null;
   }
   selectedMove = null;
   thinkingStart = null;
-  updateThinkingIndicator(null);
+  updateAutoPlayCountdown(null);
+  if (reason) updateStatus(`⚠ Auto-play cancelled: ${reason}`);
 }
 
-function updateThinkingIndicator(delayMs) {
+function updateAutoPlayCountdown(delayMs, moveDisplay) {
   const movesDiv = document.getElementById('monster-moves');
   if (!movesDiv) return;
-  // Remove any previous thinking line
-  const old = document.getElementById('monster-thinking');
+  const old = document.getElementById('monster-autoplay-info');
   if (old) old.remove();
-  if (delayMs && selectedMove) {
-    const thinkDiv = document.createElement('div');
-    thinkDiv.id = 'monster-thinking';
-    thinkDiv.style.cssText = 'display: flex; align-items: center; gap: 8px; padding: 4px 8px; color: #4CAF50; font-size: 14px;';
-    thinkDiv.innerHTML = `<span>⏳ Auto‑playing ${selectedMove.substring(0,2)}→${selectedMove.substring(2,4)} in ${(delayMs/1000).toFixed(1)}s</span>`;
-    movesDiv.appendChild(thinkDiv);
+  if (delayMs && moveDisplay) {
+    const div = document.createElement('div');
+    div.id = 'monster-autoplay-info';
+    div.style.cssText = 'padding: 6px 8px; background: rgba(76,175,80,0.2); border-radius: 4px; font-size: 13px; color: #4CAF50;';
+    div.textContent = `⏳ Auto‑playing ${moveDisplay} in ${(delayMs/1000).toFixed(1)}s`;
+    movesDiv.appendChild(div);
   }
 }
 
@@ -302,11 +294,11 @@ function createOverlay() {
     autoPlayEnabled = !autoPlayEnabled;
     autoBtn.textContent = autoPlayEnabled ? '🤖 Auto ON' : '🤖 Auto OFF';
     autoBtn.style.background = autoPlayEnabled ? '#4CAF50' : '#555';
-    if (!autoPlayEnabled) cancelAutoPlay();
+    if (!autoPlayEnabled) cancelAutoPlay('Turned off');
   };
   header.appendChild(autoBtn);
 
-  // Refresh button
+  // Refresh
   const refreshBtn = document.createElement('button');
   refreshBtn.textContent = '🔄';
   refreshBtn.title = 'Refresh analysis';
@@ -315,6 +307,12 @@ function createOverlay() {
   header.appendChild(refreshBtn);
 
   overlay.appendChild(header);
+
+  // Status line (for errors / cancellations)
+  const statusEl = document.createElement('div');
+  statusEl.id = 'monster-status';
+  statusEl.style.cssText = 'margin-bottom: 8px; font-size: 12px; color: #FFA500; display: none;';
+  overlay.appendChild(statusEl);
 
   const movesDiv = document.createElement('div');
   movesDiv.id = 'monster-moves';
@@ -364,18 +362,14 @@ function updateMovesDisplay(moves, chosenIndex) {
     moveText.style.cssText = `font-size: 18px; font-weight: ${index === chosenIndex ? '700' : '500'}; color: #fff;`;
     row.appendChild(moveText);
 
-    // Score
     const scoreSpan = document.createElement('span');
     scoreSpan.textContent = move.score;
     scoreSpan.style.cssText = 'font-size: 14px; color: #aaa; margin-left: auto;';
-    if (move.score.startsWith('+') || move.score.startsWith('M')) {
-      scoreSpan.style.color = '#4CAF50';
-    } else if (move.score.startsWith('-')) {
-      scoreSpan.style.color = '#f44336';
-    }
+    if (move.score.startsWith('+') || move.score.startsWith('M')) scoreSpan.style.color = '#4CAF50';
+    else if (move.score.startsWith('-')) scoreSpan.style.color = '#f44336';
     row.appendChild(scoreSpan);
 
-    // Play button
+    // Manual play button
     const playBtn = document.createElement('button');
     playBtn.textContent = '▶️ Play';
     playBtn.title = 'Play this move manually';
@@ -386,17 +380,19 @@ function updateMovesDisplay(moves, chosenIndex) {
     `;
     playBtn.onclick = (e) => {
       e.stopPropagation();
-      playMove(move.uci);
+      playMove(move.uci, move.san);
     };
     row.appendChild(playBtn);
 
     movesDiv.appendChild(row);
   });
 
-  // If auto‑play is in progress, re‑append the thinking indicator
+  // Preserve auto‑play info line if active
   if (selectedMove && autoPlayTimeout) {
-    const remaining = thinkingStart ? Math.max(0, thinkingStart + (autoPlayTimeout._idleTimeout || 0) - Date.now()) : 0;
-    updateThinkingIndicator(remaining > 0 ? remaining : null);
+    const remaining = thinkingStart ? Math.max(0, (autoPlayTimeout._idleTimeout || 0) + thinkingStart - Date.now()) : 0;
+    if (remaining > 0) {
+      updateAutoPlayCountdown(remaining, moves[chosenIndex]?.san);
+    }
   }
 }
 
@@ -420,11 +416,12 @@ async function doUpdate() {
     return;
   }
   if (fen === lastFEN) return;
+  const previousFEN = lastFEN;
   lastFEN = fen;
 
-  // Cancel any pending auto‑play if the position changed (e.g., opponent moved)
-  if (autoPlayTimeout) {
-    cancelAutoPlay();
+  // If board changed (opponent moved) while we were waiting to move, cancel
+  if (autoPlayTimeout && previousFEN) {
+    cancelAutoPlay('Opponent moved');
   }
 
   requestInFlight = true;
@@ -442,12 +439,12 @@ async function doUpdate() {
     const chosenIndex = selectHumanMove(moves, fen);
     updateMovesDisplay(moves, chosenIndex);
 
-    // Auto‑play if enabled and it's the user's turn
+    // Auto‑play if enabled and it's our turn
     if (autoPlayEnabled && chosenIndex >= 0 && isUserTurn()) {
       const selected = moves[chosenIndex];
       const evalScore = parseScore(selected.score);
       const thinkTime = computeThinkTime(fen, evalScore);
-      scheduleAutoPlay(selected.uci, thinkTime);
+      scheduleAutoPlay(selected.uci, thinkTime, selected.san);
     } else {
       cancelAutoPlay();
     }
