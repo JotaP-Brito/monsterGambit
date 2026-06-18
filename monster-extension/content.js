@@ -10,7 +10,7 @@ let autoPlayTimeout = null;
 let selectedMove = null;
 let thinkingStart = null;
 let lastFEN = null;
-let userColor = null;          // 'w' or 'b' — null until confidently detected
+let userColor = null;          // 'w' or 'b' — detected lazily
 let colorLockedBy = null;
 let colorDetectionAttempts = 0;
 let requestInFlight = false;
@@ -33,55 +33,41 @@ function getGameObject() {
         return val;
       }
     }
-    if (boardEl.game?.turn)  return boardEl.game;
+    if (boardEl.game?.turn) return boardEl.game;
     if (boardEl.chess?.turn) return boardEl.chess;
-    if (window.chess?.turn)  return window.chess;
+    if (window.chess?.turn) return window.chess;
   } catch (e) { /* silent */ }
   return null;
 }
 
-// ---- Detect color with confidence ----
+// ---- Detect user's colour ----
 function detectUserColorWithConfidence() {
-  // Method 1: game object myColor()
   const game = getGameObject();
   if (game) {
     try {
       let c = game.myColor?.();
       if (c === 'white') c = 'w';
       if (c === 'black') c = 'b';
-      if (c === 'w' || c === 'b') {
-        return { color: c, confidence: 'high', source: 'gameObject' };
-      }
-    } catch (e) { /* fallback */ }
+      if (c === 'w' || c === 'b') return { color: c, confidence: 'high', source: 'gameObject' };
+    } catch (e) {}
   }
-
-  // Method 2: flipped class (reliable once board is rendered)
   const boardEl = document.querySelector('chess-board') || document.querySelector('.board');
   if (boardEl) {
     const flipped = boardEl.classList.contains('flipped');
     const hasPieces = boardEl.querySelectorAll('.piece').length >= 20;
-    if (hasPieces) {
-      return { color: flipped ? 'b' : 'w', confidence: 'high', source: `flippedClass(${flipped})` };
-    }
+    if (hasPieces) return { color: flipped ? 'b' : 'w', confidence: 'high', source: `flippedClass(${flipped})` };
   }
-
-  // Method 3: player username panel position
-  const myUsernameEl = document.querySelector(
-    '[class*="user-username-component"], [class*="username"][class*="bottom"], .player-tagline-username'
-  );
+  const myUsernameEl = document.querySelector('[class*="user-username-component"], [class*="username"][class*="bottom"], .player-tagline-username');
   if (myUsernameEl) {
     let el = myUsernameEl;
     for (let i = 0; i < 6; i++) {
       el = el.parentElement;
       if (!el) break;
       if ((el.className || '').includes('bottom')) {
-        const color = isFlipped() ? 'b' : 'w';
-        return { color, confidence: 'low', source: 'panelPosition' };
+        return { color: isFlipped() ? 'b' : 'w', confidence: 'low', source: 'panelPosition' };
       }
     }
   }
-
-  // Method 4: home-rank piece colors
   const pieces = document.querySelectorAll('.piece');
   for (const piece of pieces) {
     const classes = [...piece.classList];
@@ -92,47 +78,46 @@ function detectUserColorWithConfidence() {
     if (square.length < 2) continue;
     const rank = parseInt(square[1]);
     const isWhitePiece = pieceMap[pieceClass] === pieceMap[pieceClass].toUpperCase();
-    if (rank === 1 && isWhitePiece) {
-      return { color: 'w', confidence: 'low', source: 'homeRankPiece' };
-    }
-    if (rank === 8 && !isWhitePiece) {
-      return { color: 'w', confidence: 'low', source: 'homeRankPiece' };
-    }
+    if (rank === 1 && isWhitePiece) return { color: 'w', confidence: 'low', source: 'homeRankPiece' };
+    if (rank === 8 && !isWhitePiece) return { color: 'w', confidence: 'low', source: 'homeRankPiece' };
   }
-
   return { color: 'w', confidence: 'low', source: 'default' };
 }
 
 function ensureUserColor() {
   colorDetectionAttempts++;
   const result = detectUserColorWithConfidence();
-
   if (result.confidence === 'high') {
     if (userColor !== result.color) {
-      console.log(
-        `MonsterGambit: color ${userColor ? 're-locked' : 'locked'} as '${result.color}' ` +
-        `via ${result.source} (attempt ${colorDetectionAttempts})`
-      );
+      console.log(`MonsterGambit: color ${userColor ? 're-locked' : 'locked'} as '${result.color}' via ${result.source} (attempt ${colorDetectionAttempts})`);
     }
     userColor = result.color;
     colorLockedBy = result.source;
   } else if (!userColor) {
     userColor = result.color;
     colorLockedBy = result.source + '(low)';
-    console.log(
-      `MonsterGambit: color tentatively set to '${userColor}' ` +
-      `via ${colorLockedBy} (attempt ${colorDetectionAttempts})`
-    );
+    console.log(`MonsterGambit: color tentatively set to '${userColor}' via ${colorLockedBy} (attempt ${colorDetectionAttempts})`);
   }
-
   return userColor || 'w';
 }
 
-// ---- Determine whose turn it is (highlight first) ----
-function isUserTurn() {
-  const color = ensureUserColor();
+// ---- Active colour detection (fixed move‑list fallback) ----
+function getActiveColor() {
+  // 1) Game object turn()
+  const game = getGameObject();
+  if (game && typeof game.turn === 'function') {
+    try {
+      let t = game.turn();
+      if (t === 'white') t = 'w';
+      if (t === 'black') t = 'b';
+      if (t === 'w' || t === 'b') {
+        console.log('MonsterGambit: active color via game.turn() =', t);
+        return t;
+      }
+    } catch (e) {}
+  }
 
-  // ★ Highlight method – immediately after opponent moves, the piece's square is lit
+  // 2) Highlight method – immediate after a move
   const highlights = document.querySelectorAll(
     '.highlight, [class*="highlight"], .last-move, [class*="last-move"]'
   );
@@ -143,46 +128,59 @@ function isUserTurn() {
       const pieceClass = classes.find(c => pieceMap[c]);
       if (pieceClass) {
         const pieceColor = pieceMap[pieceClass] === pieceMap[pieceClass].toUpperCase() ? 'w' : 'b';
-        if (pieceColor !== color) return true;   // opponent's piece → our turn
+        const turn = pieceColor === 'w' ? 'b' : 'w';
+        console.log(`MonsterGambit: active color via highlight = ${turn} (piece was ${pieceColor})`);
+        return turn;
       }
     }
   }
 
-  // Method 2: game object turn()
-  const game = getGameObject();
-  if (game) {
-    try {
-      let turn = game.turn?.();
-      if (turn === 'white') turn = 'w';
-      if (turn === 'black') turn = 'b';
-      if (turn === 'w' || turn === 'b') return turn === color;
-    } catch (e) { /* fallback */ }
-  }
-
-  // Method 3: FEN active color
-  if (lastFEN) {
-    const fenColor = lastFEN.split(' ')[1];
-    if (fenColor === 'w' || fenColor === 'b') return fenColor === color;
-  }
-
-  // Method 4: active clock
+  // 3) Clock active class
   const whiteActive = document.querySelector(
     '.clock-white.clock-active, [class*="clock"][class*="white"][class*="active"]'
   );
   const blackActive = document.querySelector(
     '.clock-black.clock-active, [class*="clock"][class*="black"][class*="active"]'
   );
-  if (color === 'w') return !!whiteActive && !blackActive;
-  if (color === 'b') return !!blackActive && !whiteActive;
+  if (blackActive && !whiteActive) {
+    console.log('MonsterGambit: active color via clock = b');
+    return 'b';
+  }
+  if (whiteActive && !blackActive) {
+    console.log('MonsterGambit: active color via clock = w');
+    return 'w';
+  }
 
-  return false;
+  // 4) Move list – fixed: each half-move adds 2 items (move number + move)
+  const moveListItems = document.querySelectorAll(
+    '[class*="move-list"] [class*="move"]:not([class*="move-list"]):not([class*="move-number"]), ' +
+    '.moves-list .move, ' +
+    '[data-ply]'
+  );
+  if (moveListItems.length > 0) {
+    const halfMoves = Math.floor(moveListItems.length / 2);   // real plies
+    const turn = halfMoves % 2 === 0 ? 'w' : 'b';
+    console.log(`MonsterGambit: active color via move count (${moveListItems.length} items → ${halfMoves} plies) = ${turn}`);
+    return turn;
+  }
+
+  // 5) Last resort – assume White (start of game)
+  console.log('MonsterGambit: active color default = w');
+  return 'w';
 }
 
-// ---- Build FEN (CORRECTED – no mirroring for flipped board) ----
+// ---- Turn detection for the user ----
+function isUserTurn() {
+  const color = ensureUserColor();
+  const active = getActiveColor();
+  const result = active === color;
+  console.log(`MonsterGambit: isUserTurn → userColor=${color}, activeColor=${active}, result=${result}`);
+  return result;
+}
+
+// ---- Build FEN (no mirroring) ----
 function getFEN() {
   const board = Array.from({ length: 8 }, () => Array(8).fill(null));
-  const flipped = isFlipped();
-
   document.querySelectorAll('.piece').forEach(piece => {
     const classes = [...piece.classList];
     const pieceClass = classes.find(c => pieceMap[c]);
@@ -192,11 +190,8 @@ function getFEN() {
     const square = squareClass.replace('square-', '');
     if (square.length < 2) return;
 
-    // chess.com square-XY: X = file (1=a … 8=h), Y = rank (1–8)
-    let col = parseInt(square[0]) - 1;  // 0=a, 7=h
-    let row = 8 - parseInt(square[1]);  // 0=rank8 (top), 7=rank1 (bottom)
-    // ⚠️ DO NOT mirror! Square classes are absolute, regardless of visual flip.
-
+    let col = parseInt(square[0]) - 1;
+    let row = 8 - parseInt(square[1]);
     if (row < 0 || row > 7 || col < 0 || col > 7) return;
     board[row][col] = pieceMap[pieceClass];
   });
@@ -215,25 +210,7 @@ function getFEN() {
     if (row < 7) fen += '/';
   }
 
-  const game = getGameObject();
-  let active = 'w';
-  if (game && typeof game.turn === 'function') {
-    try {
-      let t = game.turn();
-      if (t === 'white') t = 'w';
-      if (t === 'black') t = 'b';
-      if (t === 'w' || t === 'b') active = t;
-    } catch (e) { /* fallback */ }
-  } else {
-    const whiteActive = document.querySelector(
-      '.clock-white.clock-active, [class*="clock"][class*="white"][class*="active"]'
-    );
-    const blackActive = document.querySelector(
-      '.clock-black.clock-active, [class*="clock"][class*="black"][class*="active"]'
-    );
-    if (blackActive && !whiteActive) active = 'b';
-  }
-
+  const active = getActiveColor();
   fen += ` ${active} - - 0 1`;
   return fen;
 }
@@ -251,13 +228,10 @@ function parseScore(scoreStr) {
 function selectHumanMove(moves, fen) {
   if (!moves || moves.length === 0) return -1;
   if (moves.length === 1) return 0;
-
   const scores = moves.map(m => parseScore(m.score));
   const bestScore = scores[0];
-
   if (moves[0].score?.startsWith('M') && bestScore > 50) return 0;
 
-  // 5% blunder chance
   if (Math.random() < 0.05) {
     let blunderIdx = -1;
     for (let i = scores.length - 1; i >= 0; i--) {
@@ -272,7 +246,6 @@ function selectHumanMove(moves, fen) {
     }
   }
 
-  // Softmax with temperature
   const T = 2.5;
   const expScores = scores.map(s => Math.exp((s + 1) / T));
   const totalExp = expScores.reduce((a, b) => a + b, 0);
@@ -284,23 +257,21 @@ function selectHumanMove(moves, fen) {
   return 0;
 }
 
-// ---- Thinking time (erratic human) ----
+// ---- Thinking time ----
 function countPieces(fen) { return fen.split(' ')[0].replace(/[\/0-9]/g, '').length; }
 function computeThinkTime(fen, evaluationScore) {
-  if (Math.random() < 0.15) return 300 + Math.random() * 500;   // instant
-  if (Math.random() < 0.05) return 8000 + Math.random() * 7000; // very long
-
+  if (Math.random() < 0.15) return 300 + Math.random() * 500;
+  if (Math.random() < 0.05) return 8000 + Math.random() * 7000;
   const pieces = countPieces(fen);
   let baseMin, baseMax;
   if (pieces > 28) { baseMin = 1.0; baseMax = 4.0; }
   else if (pieces > 12) { baseMin = 2.0; baseMax = 10.0; }
   else { baseMin = 1.0; baseMax = 6.0; }
-
   if (evaluationScore <= -2.0) { baseMin += 2; baseMax += 4; }
   return Math.round((baseMin + Math.random() * (baseMax - baseMin)) * 1000);
 }
 
-// ---- Move execution (with mouse hesitation) ----
+// ---- Move execution ----
 function getSquareCenter(square) {
   const file = square.charCodeAt(0) - 97;
   const rank = 8 - parseInt(square[1]);
@@ -331,10 +302,7 @@ async function tryBoardAPI(from, to) {
 }
 
 async function tryTextInput(from, to) {
-  const selectors = [
-    'input[class*="move"]', 'input[placeholder*="move" i]',
-    '#move-input', '.move-input'
-  ];
+  const selectors = ['input[class*="move"]', 'input[placeholder*="move" i]', '#move-input', '.move-input'];
   let input = null;
   for (const sel of selectors) {
     input = document.querySelector(sel);
@@ -349,60 +317,61 @@ async function tryTextInput(from, to) {
   input.value = move;
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-  input.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
   return true;
 }
 
 async function tryDragMove(from, to) {
   const fromPos = getSquareCenter(from);
-  const toPos   = getSquareCenter(to);
+  const toPos = getSquareCenter(to);
   if (!fromPos || !toPos) return false;
-
   const piece = document.elementFromPoint(fromPos.x, fromPos.y);
   if (!piece) return false;
 
-  // Hover before dragging
-  await new Promise(r => setTimeout(r, 80 + Math.random() * 200));
+  // Validate piece colour
+  const classes = [...piece.classList];
+  const pieceClass = classes.find(c => pieceMap[c]);
+  if (pieceClass) {
+    const pieceColor = pieceMap[pieceClass] === pieceMap[pieceClass].toUpperCase() ? 'w' : 'b';
+    if (pieceColor !== userColor) {
+      console.warn(`Move validation failed: source piece is ${pieceColor}, but we are ${userColor}`);
+      return false;
+    }
+  }
 
+  await new Promise(r => setTimeout(r, 80 + Math.random() * 200));
   if (Math.random() < 0.3) {
     const wiggleX = fromPos.x + (Math.random() - 0.5) * 10;
     const wiggleY = fromPos.y + (Math.random() - 0.5) * 10;
     document.dispatchEvent(new PointerEvent('pointermove', {
       bubbles: true, cancelable: true, view: window,
-      clientX: wiggleX, clientY: wiggleY,
-      button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+      clientX: wiggleX, clientY: wiggleY, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
     }));
     await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
   }
 
   piece.dispatchEvent(new PointerEvent('pointerdown', {
     bubbles: true, cancelable: true, view: window,
-    clientX: fromPos.x, clientY: fromPos.y,
-    button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+    clientX: fromPos.x, clientY: fromPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
-
   await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
 
   const targetEl = document.elementFromPoint(toPos.x, toPos.y) || document.body;
   targetEl.dispatchEvent(new PointerEvent('pointermove', {
     bubbles: true, cancelable: true, view: window,
-    clientX: toPos.x, clientY: toPos.y,
-    button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+    clientX: toPos.x, clientY: toPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
-
   await new Promise(r => setTimeout(r, 30 + Math.random() * 80));
-
   targetEl.dispatchEvent(new PointerEvent('pointerup', {
     bubbles: true, cancelable: true, view: window,
-    clientX: toPos.x, clientY: toPos.y,
-    button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+    clientX: toPos.x, clientY: toPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
   return true;
 }
 
 async function playMove(uci, displayText) {
   const from = uci.substring(0, 2);
-  const to   = uci.substring(2, 4);
+  const to = uci.substring(2, 4);
   console.log(`MonsterGambit: playing ${from}→${to} (user is ${userColor})`);
   updateStatus(`Playing ${displayText || uci}…`);
 
@@ -417,7 +386,12 @@ async function playMove(uci, displayText) {
     return;
   }
   console.log('Fallback to drag simulation');
-  await tryDragMove(from, to);
+  const dragSuccess = await tryDragMove(from, to);
+  if (!dragSuccess) {
+    updateStatus('❌ Invalid move (wrong piece color)');
+    setTimeout(() => updateStatus(null), 3000);
+    return;
+  }
   await new Promise(r => setTimeout(r, 500));
   const newFEN = getFEN();
   if (newFEN === lastFEN) {
@@ -441,7 +415,6 @@ function scheduleAutoPlay(moveUci, thinkTime, moveDisplay) {
   thinkingStart = Date.now();
   selectedMove = moveUci;
   updateAutoPlayCountdown(thinkTime, moveDisplay);
-
   autoPlayTimeout = setTimeout(() => {
     if (selectedMove === moveUci && isUserTurn()) {
       playMove(moveUci, moveDisplay);
@@ -496,12 +469,10 @@ function createOverlay() {
 
   const header = document.createElement('div');
   header.style.cssText = 'font-size: 14px; font-weight: bold; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px;';
-
   const titleSpan = document.createElement('span');
   titleSpan.id = 'monster-title';
   titleSpan.textContent = '🧠 MonsterGambit';
   header.appendChild(titleSpan);
-
   const refreshBtn = document.createElement('button');
   refreshBtn.textContent = '🔄';
   refreshBtn.title = 'Refresh analysis';
@@ -535,12 +506,10 @@ function updateMovesDisplay(moves, chosenIndex) {
   const movesDiv = document.getElementById('monster-moves');
   if (!movesDiv) return;
   movesDiv.innerHTML = '';
-
   if (!moves || moves.length === 0) {
     movesDiv.innerHTML = '<div style="color:#aaa;">No move available</div>';
     return;
   }
-
   moves.forEach((move, index) => {
     const row = document.createElement('div');
     row.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 4px 8px; border-radius: 6px;';
@@ -548,41 +517,34 @@ function updateMovesDisplay(moves, chosenIndex) {
       row.style.background = 'rgba(76,175,80,0.2)';
       row.style.border = '1px solid #4CAF50';
     }
-
     const badge = document.createElement('span');
     badge.textContent = `#${index + 1}`;
     badge.style.cssText = 'font-size: 12px; font-weight: bold; color: #FFD700; background: rgba(255,215,0,0.2); padding: 2px 8px; border-radius: 4px;';
     row.appendChild(badge);
-
     if (index === chosenIndex) {
       const star = document.createElement('span');
       star.textContent = '✅';
       star.style.cssText = 'font-size: 16px;';
       row.appendChild(star);
     }
-
     const moveText = document.createElement('span');
     moveText.textContent = move.san;
     moveText.style.cssText = `font-size: 18px; font-weight: ${index === chosenIndex ? '700' : '500'}; color: #fff;`;
     row.appendChild(moveText);
-
     const scoreSpan = document.createElement('span');
     scoreSpan.textContent = move.score || '';
     scoreSpan.style.cssText = 'font-size: 14px; color: #aaa; margin-left: auto;';
     if (move.score?.startsWith('+') || move.score?.startsWith('M')) scoreSpan.style.color = '#4CAF50';
     else if (move.score?.startsWith('-')) scoreSpan.style.color = '#f44336';
     row.appendChild(scoreSpan);
-
     const playBtn = document.createElement('button');
     playBtn.textContent = '▶️ Play';
     playBtn.title = 'Play this move manually';
     playBtn.style.cssText = 'background: #555; border: none; color: white; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 4px;';
     playBtn.onclick = (e) => { e.stopPropagation(); playMove(move.uci, move.san); };
     row.appendChild(playBtn);
-
     movesDiv.appendChild(row);
   });
-
   if (selectedMove && autoPlayTimeout && thinkingStart) {
     const elapsed = Date.now() - thinkingStart;
     const totalDelay = autoPlayTimeout._idleTimeout || 0;
@@ -601,14 +563,12 @@ const thinkingMessages = ['Hmm…', 'Let’s see…', 'What to play?', 'Interest
 
 async function doUpdate() {
   if (requestInFlight) return;
-
   ensureUserColor();
   updateOverlayTitle();
 
   let fen;
   try { fen = getFEN(); } catch (e) { console.error('MonsterGambit getFEN error:', e); return; }
   if (fen === lastFEN) return;
-
   const previousFEN = lastFEN;
   lastFEN = fen;
 
@@ -628,7 +588,6 @@ async function doUpdate() {
       updateMovesDisplay([{ san: '⚠ Extension error', score: '' }], -1);
       return;
     }
-
     const moves = response?.moves || [];
     const chosenIndex = selectHumanMove(moves, fen);
     updateMovesDisplay(moves, chosenIndex);
@@ -654,11 +613,7 @@ async function doUpdate() {
 
 // ---- Observer ----
 function startObserver() {
-  const target =
-    document.querySelector('chess-board') ||
-    document.querySelector('.board') ||
-    document.body;
-
+  const target = document.querySelector('chess-board') || document.querySelector('.board') || document.body;
   const observer = new MutationObserver(() => scheduleUpdate(400));
   observer.observe(target, { childList: true, subtree: true, attributes: true });
 }
