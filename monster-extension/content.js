@@ -1,4 +1,4 @@
-// ---- Piece mapping to FEN (unchanged) ----
+// ---- Piece mapping to FEN ----
 const pieceMap = {
   'br': 'r', 'bn': 'n', 'bb': 'b', 'bq': 'q', 'bk': 'k', 'bp': 'p',
   'wr': 'R', 'wn': 'N', 'wb': 'B', 'wq': 'Q', 'wk': 'K', 'wp': 'P'
@@ -50,27 +50,20 @@ function getFEN() {
 
 // ---- Humanized move selector ----
 function parseScore(scoreStr) {
-  // "M1", "M-3", "+0.34", "-0.56"
   if (scoreStr.startsWith('M')) {
-    // Mate scores: treat as extreme values (mate in 1 = 100, mate in N = 100-N)
     const mateIn = parseInt(scoreStr.slice(1));
-    return mateIn > 0 ? 100 - mateIn : -100 - mateIn; // mate in favor is positive
+    return mateIn > 0 ? 100 - mateIn : -100 - mateIn;
   }
   return parseFloat(scoreStr) || 0;
 }
 
 function selectHumanMove(moves) {
   if (!moves || moves.length === 0) return -1;
-  if (moves.length === 1) return 0;   // only one move
-
-  // Convert scores to numbers
+  if (moves.length === 1) return 0;
   const scores = moves.map(m => parseScore(m.score));
   const bestScore = scores[0];
-
-  // If the best move is a forced mate, always suggest it (humans do see mates)
   if (moves[0].score.startsWith('M') && bestScore > 50) return 0;
 
-  // Collect candidates within 0.3 pawns of the best
   const threshold = 0.3;
   const candidates = [];
   for (let i = 0; i < scores.length; i++) {
@@ -78,17 +71,10 @@ function selectHumanMove(moves) {
       candidates.push(i);
     }
   }
-
-  // Occasionally (15% chance) include the second move even if it's slightly worse,
-  // but only if it's not a blunder (not worse than -1.0)
   if (Math.random() < 0.15 && scores.length > 1 && bestScore - scores[1] <= 1.0) {
     if (!candidates.includes(1)) candidates.push(1);
   }
-
-  // If no candidates (e.g., huge gap), fallback to the first move
   if (candidates.length === 0) return 0;
-
-  // Weighted random selection: probability proportional to score (higher = more likely)
   const totalWeight = candidates.reduce((sum, idx) => sum + Math.max(scores[idx] + 1, 0.1), 0);
   let rand = Math.random() * totalWeight;
   for (const idx of candidates) {
@@ -96,10 +82,68 @@ function selectHumanMove(moves) {
     rand -= weight;
     if (rand <= 0) return idx;
   }
-  return candidates[0]; // fallback
+  return candidates[0];
 }
 
-// ---- Rich Overlay ----
+// ---- Auto-play simulation ----
+function getSquareCenter(square) {
+  // square format: "e2" -> file: 'e', rank: '2'
+  const file = square.charCodeAt(0) - 97; // 0-7
+  const rank = 8 - parseInt(square[1]);    // 0-7 from top
+  const boardEl = document.querySelector('chess-board') || document.querySelector('.board');
+  if (!boardEl) return null;
+  const rect = boardEl.getBoundingClientRect();
+  const squareSize = rect.width / 8;
+  // chess.com board coordinates start from top-left? Usually they are oriented with white at bottom.
+  // If board is flipped, we need to mirror.
+  const flipped = isFlipped();
+  let x, y;
+  if (flipped) {
+    x = rect.left + (7 - file) * squareSize + squareSize / 2;
+    y = rect.top + (7 - rank) * squareSize + squareSize / 2;
+  } else {
+    x = rect.left + file * squareSize + squareSize / 2;
+    y = rect.top + rank * squareSize + squareSize / 2;
+  }
+  return { x, y };
+}
+
+function simulateDragDrop(fromUci, toUci) {
+  // fromUci: "e2", toUci: "e4"
+  const from = getSquareCenter(fromUci);
+  const to = getSquareCenter(toUci);
+  if (!from || !to) return false;
+
+  const target = document.elementFromPoint(from.x, from.y) || document.body;
+  // mouse down
+  target.dispatchEvent(new MouseEvent('mousedown', {
+    bubbles: true, cancelable: true, view: window,
+    clientX: from.x, clientY: from.y, button: 0
+  }));
+  // mouse move to target
+  const moveEvent = new MouseEvent('mousemove', {
+    bubbles: true, cancelable: true, view: window,
+    clientX: to.x, clientY: to.y, button: 0
+  });
+  document.dispatchEvent(moveEvent);
+  // mouse up
+  const targetEnd = document.elementFromPoint(to.x, to.y) || document.body;
+  targetEnd.dispatchEvent(new MouseEvent('mouseup', {
+    bubbles: true, cancelable: true, view: window,
+    clientX: to.x, clientY: to.y, button: 0
+  }));
+  return true;
+}
+
+function playMove(uci) {
+  // uci is like "e2e4"
+  const from = uci.substring(0, 2);
+  const to = uci.substring(2, 4);
+  console.log(`MonsterGambit: playing ${from} → ${to}`);
+  simulateDragDrop(from, to);
+}
+
+// ---- Rich Overlay with Play buttons ----
 function createOverlay() {
   let overlay = document.getElementById('monster-overlay');
   if (overlay) return overlay;
@@ -112,7 +156,7 @@ function createOverlay() {
     padding: 16px; border-radius: 12px;
     font-family: 'Segoe UI', Arial, sans-serif;
     z-index: 9999;
-    min-width: 240px;
+    min-width: 260px;
     box-shadow: 0 4px 15px rgba(0,0,0,0.6);
     backdrop-filter: blur(5px);
     border: 1px solid rgba(255,255,255,0.1);
@@ -152,13 +196,11 @@ function updateMovesDisplay(moves, chosenIndex) {
     const row = document.createElement('div');
     row.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 4px 8px; border-radius: 6px;';
 
-    // Highlight the human suggestion
     if (index === chosenIndex) {
       row.style.background = 'rgba(76,175,80,0.2)';
       row.style.border = '1px solid #4CAF50';
     }
 
-    // Rank badge
     const badge = document.createElement('span');
     badge.textContent = `#${index + 1}`;
     badge.style.cssText = `
@@ -167,7 +209,6 @@ function updateMovesDisplay(moves, chosenIndex) {
     `;
     row.appendChild(badge);
 
-    // Suggestion star
     if (index === chosenIndex) {
       const star = document.createElement('span');
       star.textContent = '✅';
@@ -175,7 +216,6 @@ function updateMovesDisplay(moves, chosenIndex) {
       row.appendChild(star);
     }
 
-    // Move notation
     const moveText = document.createElement('span');
     moveText.textContent = move.san;
     moveText.style.cssText = `font-size: 18px; font-weight: ${index === chosenIndex ? '700' : '500'}; color: #fff;`;
@@ -191,6 +231,23 @@ function updateMovesDisplay(moves, chosenIndex) {
       scoreSpan.style.color = '#f44336';
     }
     row.appendChild(scoreSpan);
+
+    // Play button
+    const playBtn = document.createElement('button');
+    playBtn.textContent = '▶️ Play';
+    playBtn.title = 'Auto-play this move';
+    playBtn.style.cssText = `
+      background: #2196F3; border: none; color: white;
+      padding: 2px 8px; border-radius: 4px; cursor: pointer;
+      font-size: 12px; margin-left: 4px;
+    `;
+    playBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (confirm(`Play ${move.san}?`)) {
+        playMove(move.uci);
+      }
+    };
+    row.appendChild(playBtn);
 
     movesDiv.appendChild(row);
   });
