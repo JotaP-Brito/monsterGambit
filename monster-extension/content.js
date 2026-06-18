@@ -11,7 +11,7 @@ let selectedMove = null;
 let thinkingStart = null;
 let lastFEN = null;
 let userColor = null;          // 'w' or 'b' — null until confidently detected
-let colorLockedBy = null;      // tracks which method locked the color (for debug)
+let colorLockedBy = null;
 let colorDetectionAttempts = 0;
 let requestInFlight = false;
 let debounceTimer = null;
@@ -27,8 +27,6 @@ function getGameObject() {
   try {
     const boardEl = document.querySelector('chess-board');
     if (!boardEl) return null;
-
-    // Walk all own keys looking for something with .turn() AND .myColor()
     for (const key of Object.keys(boardEl)) {
       const val = boardEl[key];
       if (val && typeof val.turn === 'function' && typeof val.myColor === 'function') {
@@ -44,6 +42,7 @@ function getGameObject() {
 
 // ---- Detect color with confidence ----
 function detectUserColorWithConfidence() {
+  // Method 1: game object myColor()
   const game = getGameObject();
   if (game) {
     try {
@@ -56,6 +55,7 @@ function detectUserColorWithConfidence() {
     } catch (e) { /* fallback */ }
   }
 
+  // Method 2: flipped class (reliable once board is rendered)
   const boardEl = document.querySelector('chess-board') || document.querySelector('.board');
   if (boardEl) {
     const flipped = boardEl.classList.contains('flipped');
@@ -65,6 +65,7 @@ function detectUserColorWithConfidence() {
     }
   }
 
+  // Method 3: player username panel position
   const myUsernameEl = document.querySelector(
     '[class*="user-username-component"], [class*="username"][class*="bottom"], .player-tagline-username'
   );
@@ -80,6 +81,7 @@ function detectUserColorWithConfidence() {
     }
   }
 
+  // Method 4: home-rank piece colors
   const pieces = document.querySelectorAll('.piece');
   for (const piece of pieces) {
     const classes = [...piece.classList];
@@ -126,9 +128,27 @@ function ensureUserColor() {
   return userColor || 'w';
 }
 
+// ---- Determine whose turn it is (highlight first) ----
 function isUserTurn() {
   const color = ensureUserColor();
 
+  // ★ Highlight method – immediately after opponent moves, the piece's square is lit
+  const highlights = document.querySelectorAll(
+    '.highlight, [class*="highlight"], .last-move, [class*="last-move"]'
+  );
+  for (const hl of highlights) {
+    const piece = hl.querySelector('.piece') || hl.closest('.square')?.querySelector('.piece');
+    if (piece) {
+      const classes = [...piece.classList];
+      const pieceClass = classes.find(c => pieceMap[c]);
+      if (pieceClass) {
+        const pieceColor = pieceMap[pieceClass] === pieceMap[pieceClass].toUpperCase() ? 'w' : 'b';
+        if (pieceColor !== color) return true;   // opponent's piece → our turn
+      }
+    }
+  }
+
+  // Method 2: game object turn()
   const game = getGameObject();
   if (game) {
     try {
@@ -139,11 +159,13 @@ function isUserTurn() {
     } catch (e) { /* fallback */ }
   }
 
+  // Method 3: FEN active color
   if (lastFEN) {
     const fenColor = lastFEN.split(' ')[1];
     if (fenColor === 'w' || fenColor === 'b') return fenColor === color;
   }
 
+  // Method 4: active clock
   const whiteActive = document.querySelector(
     '.clock-white.clock-active, [class*="clock"][class*="white"][class*="active"]'
   );
@@ -156,7 +178,7 @@ function isUserTurn() {
   return false;
 }
 
-// ---- Build FEN (unchanged) ----
+// ---- Build FEN (CORRECTED – no mirroring for flipped board) ----
 function getFEN() {
   const board = Array.from({ length: 8 }, () => Array(8).fill(null));
   const flipped = isFlipped();
@@ -170,9 +192,10 @@ function getFEN() {
     const square = squareClass.replace('square-', '');
     if (square.length < 2) return;
 
-    let col = parseInt(square[0]) - 1;
-    let row = 8 - parseInt(square[1]);
-    if (flipped) { col = 7 - col; row = 7 - row; }
+    // chess.com square-XY: X = file (1=a … 8=h), Y = rank (1–8)
+    let col = parseInt(square[0]) - 1;  // 0=a, 7=h
+    let row = 8 - parseInt(square[1]);  // 0=rank8 (top), 7=rank1 (bottom)
+    // ⚠️ DO NOT mirror! Square classes are absolute, regardless of visual flip.
 
     if (row < 0 || row > 7 || col < 0 || col > 7) return;
     board[row][col] = pieceMap[pieceClass];
@@ -225,15 +248,6 @@ function parseScore(scoreStr) {
   return parseFloat(scoreStr) || 0;
 }
 
-function isNaturalMove(uci) {
-  if (uci === 'e1g1' || uci === 'e1c1' || uci === 'e8g8' || uci === 'e8c8') return true;
-  const from = uci.substring(0, 2);
-  const to = uci.substring(2, 4);
-  if (from[1] === '1' && to[1] !== '1') return true;
-  if (from[1] === '8' && to[1] !== '8') return true;
-  return false;
-}
-
 function selectHumanMove(moves, fen) {
   if (!moves || moves.length === 0) return -1;
   if (moves.length === 1) return 0;
@@ -241,12 +255,10 @@ function selectHumanMove(moves, fen) {
   const scores = moves.map(m => parseScore(m.score));
   const bestScore = scores[0];
 
-  // Forced mate? Play it (even a 500 can see mate in 1)
   if (moves[0].score?.startsWith('M') && bestScore > 50) return 0;
 
-  // ----- 5 % blunder chance: pick a move that is at least 3 pawns worse -----
+  // 5% blunder chance
   if (Math.random() < 0.05) {
-    // Find the worst move among top 3 that is at least 3 pawns below best
     let blunderIdx = -1;
     for (let i = scores.length - 1; i >= 0; i--) {
       if (bestScore - scores[i] >= 3.0) {
@@ -260,39 +272,33 @@ function selectHumanMove(moves, fen) {
     }
   }
 
-  // ----- Softmax with temperature to flatten probabilities -----
-  const T = 2.5; // higher = more random
-  const expScores = scores.map(s => Math.exp((s + 1) / T)); // shift by +1 to avoid negative exp
+  // Softmax with temperature
+  const T = 2.5;
+  const expScores = scores.map(s => Math.exp((s + 1) / T));
   const totalExp = expScores.reduce((a, b) => a + b, 0);
   let rand = Math.random() * totalExp;
   for (let i = 0; i < scores.length; i++) {
     rand -= expScores[i];
     if (rand <= 0) return i;
   }
-
-  // Fallback: pick the best move (should never get here)
   return 0;
 }
 
 // ---- Thinking time (erratic human) ----
+function countPieces(fen) { return fen.split(' ')[0].replace(/[\/0-9]/g, '').length; }
 function computeThinkTime(fen, evaluationScore) {
-  // Occasionally play instantly (like a premove)
-  if (Math.random() < 0.15) return 300 + Math.random() * 500; // 0.3 – 0.8 s
-
-  // Occasionally take a very long "think" (pretend to be distracted)
-  if (Math.random() < 0.05) return 8000 + Math.random() * 7000; // 8 – 15 s
+  if (Math.random() < 0.15) return 300 + Math.random() * 500;   // instant
+  if (Math.random() < 0.05) return 8000 + Math.random() * 7000; // very long
 
   const pieces = countPieces(fen);
   let baseMin, baseMax;
-  if (pieces > 28) { baseMin = 1.0; baseMax = 4.0; }      // opening
-  else if (pieces > 12) { baseMin = 2.0; baseMax = 10.0; } // middlegame
-  else { baseMin = 1.0; baseMax = 6.0; }                   // endgame
+  if (pieces > 28) { baseMin = 1.0; baseMax = 4.0; }
+  else if (pieces > 12) { baseMin = 2.0; baseMax = 10.0; }
+  else { baseMin = 1.0; baseMax = 6.0; }
 
   if (evaluationScore <= -2.0) { baseMin += 2; baseMax += 4; }
   return Math.round((baseMin + Math.random() * (baseMax - baseMin)) * 1000);
 }
-
-function countPieces(fen) { return fen.split(' ')[0].replace(/[\/0-9]/g, '').length; }
 
 // ---- Move execution (with mouse hesitation) ----
 function getSquareCenter(square) {
@@ -352,14 +358,12 @@ async function tryDragMove(from, to) {
   const toPos   = getSquareCenter(to);
   if (!fromPos || !toPos) return false;
 
-  // Simulate human mouse: hover over piece, maybe wiggle
   const piece = document.elementFromPoint(fromPos.x, fromPos.y);
   if (!piece) return false;
 
-  // Hover for a random short time
+  // Hover before dragging
   await new Promise(r => setTimeout(r, 80 + Math.random() * 200));
 
-  // Maybe wiggle the mouse a tiny bit
   if (Math.random() < 0.3) {
     const wiggleX = fromPos.x + (Math.random() - 0.5) * 10;
     const wiggleY = fromPos.y + (Math.random() - 0.5) * 10;
@@ -371,7 +375,6 @@ async function tryDragMove(from, to) {
     await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
   }
 
-  // Press down
   piece.dispatchEvent(new PointerEvent('pointerdown', {
     bubbles: true, cancelable: true, view: window,
     clientX: fromPos.x, clientY: fromPos.y,
@@ -380,7 +383,6 @@ async function tryDragMove(from, to) {
 
   await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
 
-  // Move to target
   const targetEl = document.elementFromPoint(toPos.x, toPos.y) || document.body;
   targetEl.dispatchEvent(new PointerEvent('pointermove', {
     bubbles: true, cancelable: true, view: window,
@@ -390,7 +392,6 @@ async function tryDragMove(from, to) {
 
   await new Promise(r => setTimeout(r, 30 + Math.random() * 80));
 
-  // Release
   targetEl.dispatchEvent(new PointerEvent('pointerup', {
     bubbles: true, cancelable: true, view: window,
     clientX: toPos.x, clientY: toPos.y,
@@ -646,7 +647,7 @@ async function doUpdate() {
         } else {
           updateStatus(`Waiting for opponent… (playing as ${userColor === 'b' ? 'Black' : 'White'})`);
         }
-      }, 200);
+      }, 500);
     }
   });
 }
