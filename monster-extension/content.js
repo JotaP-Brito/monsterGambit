@@ -88,7 +88,6 @@ function selectHumanMove(moves, fen) {
   const scores = moves.map(m => parseScore(m.score));
   const bestScore = scores[0];
   if (moves[0].score.startsWith('M') && bestScore > 50) return 0;
-
   const threshold = 0.3;
   const candidates = [];
   for (let i = 0; i < scores.length; i++) {
@@ -138,7 +137,7 @@ function computeThinkTime(fen, evaluationScore) {
   return Math.round((baseMin + Math.random() * (baseMax - baseMin)) * 1000);
 }
 
-// ---- Move execution with retry and feedback ----
+// ---- Move execution (multiple fallbacks) ----
 function getSquareCenter(square) {
   const file = square.charCodeAt(0) - 97;
   const rank = 8 - parseInt(square[1]);
@@ -158,28 +157,66 @@ function getSquareCenter(square) {
   return { x, y };
 }
 
-async function simulateDragDrop(fromUci, toUci) {
-  const from = getSquareCenter(fromUci);
-  const to = getSquareCenter(toUci);
-  if (!from || !to) return false;
-  const target = document.elementFromPoint(from.x, from.y) || document.body;
-  target.dispatchEvent(new MouseEvent('mousedown', {
+// Method 1: Use chessboard internal move()
+function tryBoardAPI(from, to) {
+  const boardEl = document.querySelector('chess-board');
+  if (boardEl && typeof boardEl.move === 'function') {
+    boardEl.move(from, to);
+    return true;
+  }
+  if (boardEl && boardEl.board && typeof boardEl.board.move === 'function') {
+    boardEl.board.move(from, to);
+    return true;
+  }
+  return false;
+}
+
+// Method 2: Type move into text input and press Enter
+async function tryTextInput(from, to) {
+  // chess.com has an input with class "move-input" or inside a chat panel
+  const input = document.querySelector('input.move-input, input[class*="move"], input[placeholder*="move"]');
+  if (!input) return false;
+  const uciMove = from + to;
+  // Clear input and type the move
+  input.value = '';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 50));
+  input.value = uciMove;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  // Press Enter
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+  return true;
+}
+
+// Method 3: Pointer events drag simulation
+async function tryPointerDrag(from, to) {
+  const fromPos = getSquareCenter(from);
+  const toPos = getSquareCenter(to);
+  if (!fromPos || !toPos) return false;
+  const boardEl = document.querySelector('chess-board') || document.querySelector('.board') || document.body;
+
+  const pointerdown = new PointerEvent('pointerdown', {
     bubbles: true, cancelable: true, view: window,
-    clientX: from.x, clientY: from.y, button: 0
-  }));
-  // tiny delay to simulate human drag
-  await new Promise(r => setTimeout(r, 30 + Math.random() * 70));
-  const moveEvent = new MouseEvent('mousemove', {
-    bubbles: true, cancelable: true, view: window,
-    clientX: to.x, clientY: to.y, button: 0
+    clientX: fromPos.x, clientY: fromPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   });
-  document.dispatchEvent(moveEvent);
-  await new Promise(r => setTimeout(r, 20));
-  const targetEnd = document.elementFromPoint(to.x, to.y) || document.body;
-  targetEnd.dispatchEvent(new MouseEvent('mouseup', {
+  boardEl.dispatchEvent(pointerdown);
+
+  await new Promise(r => setTimeout(r, 30 + Math.random() * 70));
+
+  const pointermove = new PointerEvent('pointermove', {
     bubbles: true, cancelable: true, view: window,
-    clientX: to.x, clientY: to.y, button: 0
-  }));
+    clientX: toPos.x, clientY: toPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+  });
+  document.dispatchEvent(pointermove);
+
+  await new Promise(r => setTimeout(r, 20));
+
+  const pointerup = new PointerEvent('pointerup', {
+    bubbles: true, cancelable: true, view: window,
+    clientX: toPos.x, clientY: toPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+  });
+  boardEl.dispatchEvent(pointerup);
   return true;
 }
 
@@ -188,20 +225,32 @@ async function playMove(uci, displayText) {
   const to = uci.substring(2, 4);
   console.log(`MonsterGambit: attempting ${from}→${to}`);
   updateStatus(`Playing ${displayText || uci}...`);
-  const success = await simulateDragDrop(from, to);
-  if (!success) {
-    updateStatus('❌ Move failed');
-  } else {
-    // Wait for board update to confirm move was accepted
-    await new Promise(r => setTimeout(r, 500));
-    // If the FEN hasn't changed, the move might not have registered; retry once
-    const newFen = getFEN();
-    if (lastFEN === newFen) {
-      console.log('Move may have failed, retrying...');
-      await simulateDragDrop(from, to);
-    }
+
+  // Try board API first (fastest, most reliable)
+  if (tryBoardAPI(from, to)) {
+    console.log('Move via board API');
+    setTimeout(() => updateStatus(null), 2000);
+    return;
   }
-  // Clear status after a while
+
+  // Try text input
+  if (await tryTextInput(from, to)) {
+    console.log('Move via text input');
+    setTimeout(() => updateStatus(null), 2000);
+    return;
+  }
+
+  // Try pointer drag
+  console.log('Fallback to pointer drag');
+  await tryPointerDrag(from, to);
+
+  // Wait and check if board changed (retry once if not)
+  await new Promise(r => setTimeout(r, 500));
+  const newFen = getFEN();
+  if (lastFEN === newFen) {
+    console.log('Move may have failed, retrying with board API again...');
+    tryBoardAPI(from, to);
+  }
   setTimeout(() => updateStatus(null), 2000);
 }
 
@@ -213,7 +262,7 @@ function updateStatus(msg) {
   }
 }
 
-// ---- Auto‑play scheduling ----
+// ---- Auto-play scheduling ----
 function scheduleAutoPlay(moveUci, thinkTime, moveDisplay) {
   cancelAutoPlay();
   thinkingStart = Date.now();
@@ -275,12 +324,10 @@ function createOverlay() {
 
   const header = document.createElement('div');
   header.style.cssText = 'font-size: 14px; font-weight: bold; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;';
-
   const titleSpan = document.createElement('span');
   titleSpan.textContent = '🧠 MonsterGambit';
   header.appendChild(titleSpan);
 
-  // Auto‑play toggle
   const autoBtn = document.createElement('button');
   autoBtn.id = 'monster-autoplay-btn';
   autoBtn.textContent = autoPlayEnabled ? '🤖 Auto ON' : '🤖 Auto OFF';
@@ -298,7 +345,6 @@ function createOverlay() {
   };
   header.appendChild(autoBtn);
 
-  // Refresh
   const refreshBtn = document.createElement('button');
   refreshBtn.textContent = '🔄';
   refreshBtn.title = 'Refresh analysis';
@@ -308,7 +354,6 @@ function createOverlay() {
 
   overlay.appendChild(header);
 
-  // Status line (for errors / cancellations)
   const statusEl = document.createElement('div');
   statusEl.id = 'monster-status';
   statusEl.style.cssText = 'margin-bottom: 8px; font-size: 12px; color: #FFA500; display: none;';
@@ -326,73 +371,52 @@ function createOverlay() {
 function updateMovesDisplay(moves, chosenIndex) {
   const movesDiv = document.getElementById('monster-moves');
   if (!movesDiv) return;
-
   movesDiv.innerHTML = '';
   if (!moves || moves.length === 0) {
     movesDiv.innerHTML = '<div style="color:#aaa;">No move available</div>';
     return;
   }
-
   moves.forEach((move, index) => {
     const row = document.createElement('div');
     row.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 4px 8px; border-radius: 6px;';
-
     if (index === chosenIndex) {
       row.style.background = 'rgba(76,175,80,0.2)';
       row.style.border = '1px solid #4CAF50';
     }
-
     const badge = document.createElement('span');
     badge.textContent = `#${index + 1}`;
-    badge.style.cssText = `
-      font-size: 12px; font-weight: bold; color: #FFD700;
-      background: rgba(255,215,0,0.2); padding: 2px 8px; border-radius: 4px;
-    `;
+    badge.style.cssText = 'font-size: 12px; font-weight: bold; color: #FFD700; background: rgba(255,215,0,0.2); padding: 2px 8px; border-radius: 4px;';
     row.appendChild(badge);
-
     if (index === chosenIndex) {
       const star = document.createElement('span');
       star.textContent = '✅';
       star.style.cssText = 'font-size: 16px;';
       row.appendChild(star);
     }
-
     const moveText = document.createElement('span');
     moveText.textContent = move.san;
     moveText.style.cssText = `font-size: 18px; font-weight: ${index === chosenIndex ? '700' : '500'}; color: #fff;`;
     row.appendChild(moveText);
-
     const scoreSpan = document.createElement('span');
     scoreSpan.textContent = move.score;
     scoreSpan.style.cssText = 'font-size: 14px; color: #aaa; margin-left: auto;';
     if (move.score.startsWith('+') || move.score.startsWith('M')) scoreSpan.style.color = '#4CAF50';
     else if (move.score.startsWith('-')) scoreSpan.style.color = '#f44336';
     row.appendChild(scoreSpan);
-
-    // Manual play button
     const playBtn = document.createElement('button');
     playBtn.textContent = '▶️ Play';
     playBtn.title = 'Play this move manually';
-    playBtn.style.cssText = `
-      background: #555; border: none; color: white;
-      padding: 2px 8px; border-radius: 4px; cursor: pointer;
-      font-size: 12px; margin-left: 4px;
-    `;
+    playBtn.style.cssText = 'background: #555; border: none; color: white; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 4px;';
     playBtn.onclick = (e) => {
       e.stopPropagation();
       playMove(move.uci, move.san);
     };
     row.appendChild(playBtn);
-
     movesDiv.appendChild(row);
   });
-
-  // Preserve auto‑play info line if active
   if (selectedMove && autoPlayTimeout) {
     const remaining = thinkingStart ? Math.max(0, (autoPlayTimeout._idleTimeout || 0) + thinkingStart - Date.now()) : 0;
-    if (remaining > 0) {
-      updateAutoPlayCountdown(remaining, moves[chosenIndex]?.san);
-    }
+    if (remaining > 0) updateAutoPlayCountdown(remaining, moves[chosenIndex]?.san);
   }
 }
 
@@ -419,7 +443,6 @@ async function doUpdate() {
   const previousFEN = lastFEN;
   lastFEN = fen;
 
-  // If board changed (opponent moved) while we were waiting to move, cancel
   if (autoPlayTimeout && previousFEN) {
     cancelAutoPlay('Opponent moved');
   }
@@ -439,7 +462,6 @@ async function doUpdate() {
     const chosenIndex = selectHumanMove(moves, fen);
     updateMovesDisplay(moves, chosenIndex);
 
-    // Auto‑play if enabled and it's our turn
     if (autoPlayEnabled && chosenIndex >= 0 && isUserTurn()) {
       const selected = moves[chosenIndex];
       const evalScore = parseScore(selected.score);
