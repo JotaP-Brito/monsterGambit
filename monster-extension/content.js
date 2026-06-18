@@ -19,6 +19,7 @@ let debounceTimer = null;
 let gameEndDetected = false;
 let observer = null;
 let lastForcedCheck = 0;
+let isPlayingMove = false;      // true while a drag/click move is in progress
 
 // ---- Board orientation ----
 function isFlipped() {
@@ -389,14 +390,18 @@ async function playMove(uci, displayText) {
   console.log(`MonsterGambit: playing ${from}→${to} (user is ${userColor})`);
   updateStatus(`Playing ${displayText || uci}…`);
 
+  isPlayingMove = true;   // <-- lock updates while moving
+
   if (await tryBoardAPI(from, to)) {
     console.log('Move via board API');
     setTimeout(() => updateStatus(null), 2000);
+    isPlayingMove = false;
     return;
   }
   if (await tryTextInput(from, to)) {
     console.log('Move via text input');
     setTimeout(() => updateStatus(null), 2000);
+    isPlayingMove = false;
     return;
   }
   console.log('Fallback to drag simulation');
@@ -404,6 +409,7 @@ async function playMove(uci, displayText) {
   if (!dragSuccess) {
     updateStatus('❌ Invalid move (wrong piece color)');
     setTimeout(() => updateStatus(null), 3000);
+    isPlayingMove = false;
     return;
   }
   await new Promise(r => setTimeout(r, 500));
@@ -413,6 +419,7 @@ async function playMove(uci, displayText) {
     await tryBoardAPI(from, to);
   }
   setTimeout(() => updateStatus(null), 2000);
+  isPlayingMove = false;  // <-- unlock after move finishes
 }
 
 function updateStatus(msg) {
@@ -581,6 +588,18 @@ function resetRequestFlag() {
 }
 
 async function doUpdate() {
+  // If a move is currently being physically played, don't interfere
+  if (isPlayingMove) return;
+
+  // If we already have a move scheduled and the position hasn't changed, do nothing
+  if (autoPlayTimeout && selectedMove && lastFEN) {
+    const currentFen = getFEN();
+    if (currentFen === lastFEN) {
+      // Still waiting to execute the previously scheduled move – skip update
+      return;
+    }
+  }
+
   if (requestInFlight) {
     console.warn('MonsterGambit: update skipped – request already in flight');
     return;
@@ -592,20 +611,22 @@ async function doUpdate() {
   let fen;
   try { fen = getFEN(); } catch (e) { console.error('MonsterGambit getFEN error:', e); return; }
 
+  // Only force update if we DON'T already have a move scheduled
   const now = Date.now();
-  const forceUpdate = (now - lastForcedCheck > 5000) && isUserTurn();
+  const forceUpdate = (now - lastForcedCheck > 5000) && !autoPlayTimeout && isUserTurn();
 
   if (fen === lastFEN && !forceUpdate) return;
 
   if (forceUpdate) {
-    console.log('MonsterGambit: forced update because it’s our turn and 5s elapsed');
+    console.log('MonsterGambit: forced update because it’s our turn and no move scheduled');
   }
 
   lastForcedCheck = now;
   const previousFEN = lastFEN;
   lastFEN = fen;
 
-  if (autoPlayTimeout && previousFEN) {
+  // Only cancel pending auto-play if the position actually changed (opponent moved)
+  if (autoPlayTimeout && previousFEN && fen !== previousFEN) {
     cancelAutoPlay('Position changed');
   }
 
@@ -620,7 +641,6 @@ async function doUpdate() {
   updateMovesDisplay([{ san: '…', score: '' }], -1);
   updateStatus(thinkingMessages[Math.floor(Math.random() * thinkingMessages.length)]);
 
-  // In endgames (≤12 pieces), reduce analysis depth for speed
   const pieces = countPieces(fen);
   const isEndgame = pieces <= 12;
   const analysisTime = isEndgame ? 0.3 : 0.5;
@@ -657,9 +677,8 @@ async function doUpdate() {
   });
 }
 
-// ---- Game‑end detection & auto‑queue (improved) ----
+// ---- Game‑end detection & auto‑queue ----
 function checkGameEnd() {
-  // 1) Visible modals / overlays
   const endSelectors = [
     '.game-over-modal', '[class*="game-over"]', '.post-game-modal',
     '[class*="post-game"]', '.result-modal', '[class*="result-modal"]',
@@ -671,7 +690,6 @@ function checkGameEnd() {
     if (el && el.offsetParent !== null) return true;
   }
 
-  // 2) Result text
   const resultText = document.querySelector(
     '.game-result, [class*="result"], .sidebar-result, .game-end-text, [class*="end-text"]'
   );
@@ -682,13 +700,11 @@ function checkGameEnd() {
     }
   }
 
-  // 3) Review button
   const reviewBtn = document.querySelector(
     '[class*="game-review-button"], button[class*="review"], a[class*="review"]'
   );
   if (reviewBtn) return true;
 
-  // 4) Both clocks 0:00
   const whiteClock = document.querySelector('.clock-white, [class*="clock-white"]');
   const blackClock = document.querySelector('.clock-black, [class*="clock-black"]');
   if (whiteClock && blackClock) {
@@ -730,14 +746,13 @@ function tryStartNextGame() {
   }
 
   console.log('MonsterGambit: no button found – navigating to 10+0 challenge');
-  window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=rated';
+  window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=unrated';
 }
 
-// Reset detection when a new game appears (board fully reset)
 function resetGameEndDetection() {
   if (!gameEndDetected) return;
   const pieces = document.querySelectorAll('.piece');
-  if (pieces.length >= 28) { // full starting position
+  if (pieces.length >= 28) {
     console.log('MonsterGambit: new game detected – resetting auto-queue');
     gameEndDetected = false;
   }
