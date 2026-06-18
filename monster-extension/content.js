@@ -339,11 +339,12 @@ async function tryTextInput(from, to) {
 
 async function tryDragMove(from, to) {
   const fromPos = getSquareCenter(from);
-  const toPos = getSquareCenter(to);
+  const toPos   = getSquareCenter(to);
   if (!fromPos || !toPos) return false;
   const piece = document.elementFromPoint(fromPos.x, fromPos.y);
   if (!piece) return false;
 
+  // Validate piece colour
   const classes = [...piece.classList];
   const pieceClass = classes.find(c => pieceMap[c]);
   if (pieceClass) {
@@ -354,33 +355,53 @@ async function tryDragMove(from, to) {
     }
   }
 
-  await new Promise(r => setTimeout(r, 80 + Math.random() * 200));
-  if (Math.random() < 0.3) {
-    const wiggleX = fromPos.x + (Math.random() - 0.5) * 10;
-    const wiggleY = fromPos.y + (Math.random() - 0.5) * 10;
+  // 1. Hover over the piece for a human‑like pause (300‑700ms)
+  await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
+
+  // 2. Wiggle the mouse a bit before grabbing (50% chance)
+  if (Math.random() < 0.5) {
+    const wiggleX = fromPos.x + (Math.random() - 0.5) * 15;
+    const wiggleY = fromPos.y + (Math.random() - 0.5) * 15;
     document.dispatchEvent(new PointerEvent('pointermove', {
       bubbles: true, cancelable: true, view: window,
-      clientX: wiggleX, clientY: wiggleY, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+      clientX: wiggleX, clientY: wiggleY,
+      button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
     }));
-    await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
+    await new Promise(r => setTimeout(r, 60 + Math.random() * 120));
   }
 
+  // 3. Pick up the piece
   piece.dispatchEvent(new PointerEvent('pointerdown', {
     bubbles: true, cancelable: true, view: window,
-    clientX: fromPos.x, clientY: fromPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+    clientX: fromPos.x, clientY: fromPos.y,
+    button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
-  await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
+
+  // 4. Drag to the target square (with a small mid‑drag pause sometimes)
+  await new Promise(r => setTimeout(r, 60 + Math.random() * 120));
+
+  // Occasionally (20%) stop mid‑drag for a fraction of a second
+  if (Math.random() < 0.2) {
+    await new Promise(r => setTimeout(r, 100 + Math.random() * 200));
+  }
 
   const targetEl = document.elementFromPoint(toPos.x, toPos.y) || document.body;
   targetEl.dispatchEvent(new PointerEvent('pointermove', {
     bubbles: true, cancelable: true, view: window,
-    clientX: toPos.x, clientY: toPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+    clientX: toPos.x, clientY: toPos.y,
+    button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
-  await new Promise(r => setTimeout(r, 30 + Math.random() * 80));
+
+  // 5. Pause before releasing (like double‑checking the move)
+  await new Promise(r => setTimeout(r, 50 + Math.random() * 150));
+
+  // 6. Release the piece
   targetEl.dispatchEvent(new PointerEvent('pointerup', {
     bubbles: true, cancelable: true, view: window,
-    clientX: toPos.x, clientY: toPos.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+    clientX: toPos.x, clientY: toPos.y,
+    button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
+
   return true;
 }
 
@@ -405,6 +426,10 @@ async function playMove(uci, displayText) {
     return;
   }
   console.log('Fallback to drag simulation');
+
+  // Random mental pause before moving (0‑1.5s)
+  await new Promise(r => setTimeout(r, Math.random() * 1500));
+
   const dragSuccess = await tryDragMove(from, to);
   if (!dragSuccess) {
     updateStatus('❌ Invalid move (wrong piece color)');
@@ -580,7 +605,11 @@ function scheduleUpdate(delay = 400) {
   debounceTimer = setTimeout(doUpdate, delay);
 }
 
-const thinkingMessages = ['Hmm…', 'Let’s see…', 'What to play?', 'Interesting position', 'Umm…'];
+const thinkingMessages = [
+  'Hmm…', 'Let’s see…', 'What to play?', 'Interesting position', 'Umm…',
+  'Hmm, what now?', 'Let me think…', 'This looks tricky', 'Okay, okay…',
+  'Maybe this?', 'Let’s try something', 'Need to be careful', 'Hmm… not sure'
+];
 
 function resetRequestFlag() {
   requestInFlight = false;
