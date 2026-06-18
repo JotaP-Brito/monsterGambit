@@ -10,11 +10,12 @@ let autoPlayTimeout = null;
 let selectedMove = null;
 let thinkingStart = null;
 let lastFEN = null;
-let userColor = null;          // 'w' or 'b' — detected lazily
+let userColor = null;
 let colorLockedBy = null;
 let colorDetectionAttempts = 0;
 let requestInFlight = false;
 let debounceTimer = null;
+let gameEndDetected = false;      // prevents repeated next‑game triggers
 
 // ---- Board orientation ----
 function isFlipped() {
@@ -49,7 +50,7 @@ function detectUserColorWithConfidence() {
       if (c === 'white') c = 'w';
       if (c === 'black') c = 'b';
       if (c === 'w' || c === 'b') return { color: c, confidence: 'high', source: 'gameObject' };
-    } catch (e) {}
+    } catch (e) { }
   }
   const boardEl = document.querySelector('chess-board') || document.querySelector('.board');
   if (boardEl) {
@@ -103,7 +104,6 @@ function ensureUserColor() {
 
 // ---- Active colour detection (fixed move‑list fallback) ----
 function getActiveColor() {
-  // 1) Game object turn()
   const game = getGameObject();
   if (game && typeof game.turn === 'function') {
     try {
@@ -114,10 +114,9 @@ function getActiveColor() {
         console.log('MonsterGambit: active color via game.turn() =', t);
         return t;
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
-  // 2) Highlight method – immediate after a move
   const highlights = document.querySelectorAll(
     '.highlight, [class*="highlight"], .last-move, [class*="last-move"]'
   );
@@ -135,7 +134,6 @@ function getActiveColor() {
     }
   }
 
-  // 3) Clock active class
   const whiteActive = document.querySelector(
     '.clock-white.clock-active, [class*="clock"][class*="white"][class*="active"]'
   );
@@ -151,25 +149,22 @@ function getActiveColor() {
     return 'w';
   }
 
-  // 4) Move list – fixed: each half-move adds 2 items (move number + move)
   const moveListItems = document.querySelectorAll(
     '[class*="move-list"] [class*="move"]:not([class*="move-list"]):not([class*="move-number"]), ' +
     '.moves-list .move, ' +
     '[data-ply]'
   );
   if (moveListItems.length > 0) {
-    const halfMoves = Math.floor(moveListItems.length / 2);   // real plies
+    const halfMoves = Math.floor(moveListItems.length / 2);
     const turn = halfMoves % 2 === 0 ? 'w' : 'b';
     console.log(`MonsterGambit: active color via move count (${moveListItems.length} items → ${halfMoves} plies) = ${turn}`);
     return turn;
   }
 
-  // 5) Last resort – assume White (start of game)
   console.log('MonsterGambit: active color default = w');
   return 'w';
 }
 
-// ---- Turn detection for the user ----
 function isUserTurn() {
   const color = ensureUserColor();
   const active = getActiveColor();
@@ -296,7 +291,7 @@ async function tryBoardAPI(from, to) {
   if (!boardEl) return false;
   const chess = boardEl.game || boardEl.chess || window.chess;
   if (chess && typeof chess.move === 'function') {
-    try { chess.move({ from, to, promotion: 'q' }); return true; } catch (e) {}
+    try { chess.move({ from, to, promotion: 'q' }); return true; } catch (e) { }
   }
   return false;
 }
@@ -328,7 +323,6 @@ async function tryDragMove(from, to) {
   const piece = document.elementFromPoint(fromPos.x, fromPos.y);
   if (!piece) return false;
 
-  // Validate piece colour
   const classes = [...piece.classList];
   const pieceClass = classes.find(c => pieceMap[c]);
   if (pieceClass) {
@@ -611,7 +605,146 @@ async function doUpdate() {
   });
 }
 
-// ---- Observer ----
+// ---- Game‑end detection & auto‑queue ----
+function tryStartNextGame() {
+  if (gameEndDetected) return;
+  gameEndDetected = true;
+
+  console.log('MonsterGambit: Game ended – looking for next game button…');
+
+  // Look for a button that contains "10 min" or "10+0"
+  const buttons = document.querySelectorAll('button, a, span[role="button"]');
+  const targetTexts = ['10 min', '10+0', 'new 10', 'play again 10'];
+
+  for (const btn of buttons) {
+    const text = btn.textContent?.toLowerCase() || '';
+    for (const t of targetTexts) {
+      if (text.includes(t)) {
+        console.log(`MonsterGambit: clicking "${btn.textContent.trim()}" to start next game`);
+        btn.click();
+        return;
+      }
+    }
+  }
+
+  // Fallback: click the generic "New Game" or "Play Again" button
+  for (const btn of buttons) {
+    const text = btn.textContent?.toLowerCase() || '';
+    if (text.includes('new game') || text.includes('play again')) {
+      console.log(`MonsterGambit: clicking "${btn.textContent.trim()}" as fallback`);
+      btn.click();
+      return;
+    }
+  }
+
+  // Last resort: navigate to 10+0 challenge page
+  console.log('MonsterGambit: no button found – navigating to 10+0 challenge');
+  window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=rated';
+}
+
+function checkGameEnd() {
+  // Detect the post‑game modal or overlay
+  const endSelectors = [
+    '.game-over-modal',
+    '[class*="game-over"]',
+    '.post-game-modal',
+    '[class*="post-game"]',
+    '.result-modal',
+    '[class*="result-modal"]'
+  ];
+
+  for (const sel of endSelectors) {
+    const el = document.querySelector(sel);
+    if (el && el.offsetParent !== null) { // visible
+      return true;
+    }
+  }
+
+  // Fallback: if both clocks show 0:00 or very low time and the board has no legal moves? (simpler: detect the result text)
+  const resultText = document.querySelector('.game-result, [class*="result"], .sidebar-result');
+  if (resultText && resultText.textContent?.match(/1-0|0-1|½-½|won|draw|resign/i)) {
+    return true;
+  }
+
+  return false;
+}
+
+// Watch for game end modal to appear
+function checkGameEnd() {
+  // ---- 1. Look for the post‑game modal or overlay (covers all endings) ----
+  const endSelectors = [
+    '.game-over-modal',
+    '[class*="game-over"]',
+    '.post-game-modal',
+    '[class*="post-game"]',
+    '.result-modal',
+    '[class*="result-modal"]',
+    '.game-review-modal',          // appears after every game
+    '[class*="game-review"]'
+  ];
+
+  for (const sel of endSelectors) {
+    const el = document.querySelector(sel);
+    if (el && el.offsetParent !== null) { // visible
+      return true;
+    }
+  }
+
+  // ---- 2. Look for result text in sidebar or banner ----
+  const resultText = document.querySelector(
+    '.game-result, ' +
+    '[class*="result"], ' +
+    '.sidebar-result, ' +
+    '.game-end-text, ' +
+    '[class*="end-text"]'
+  );
+
+  if (resultText) {
+    const text = resultText.textContent?.toLowerCase() || '';
+    const patterns = [
+      /\b1\-0\b/, /\b0\-1\b/, /\b½\-½\b/,   // scores
+      /\bwon\b/, /\bdrew\b/, /\bdraw\b/,
+      /\bresign\b/, /\babandon\b/, /\btimeout\b/,
+      /\bforfeit\b/, /\bstalemate\b/,
+      /\bgame over\b/, /\bgame ended\b/,
+      /\bwon on time\b/, /\bwhite wins\b/, /\bblack wins\b/
+    ];
+
+    for (const pattern of patterns) {
+      if (pattern.test(text)) {
+        return true;
+      }
+    }
+  }
+
+  // ---- 3. Game review button (appears after every game) ----
+  const reviewBtn = document.querySelector(
+    '[class*="game-review-button"], ' +
+    'button[class*="review"], ' +
+    'a[class*="review"], ' +
+    'button:contains("Game Review"), ' +
+    'a:contains("Game Review")'
+  );
+  if (reviewBtn) return true;
+
+  // ---- 4. Both clocks showing 0:00 or game inactive ----
+  const whiteClock = document.querySelector('.clock-white, [class*="clock-white"]');
+  const blackClock = document.querySelector('.clock-black, [class*="clock-black"]');
+
+  if (whiteClock && blackClock) {
+    const whiteTime = whiteClock.textContent?.trim() || '';
+    const blackTime = blackClock.textContent?.trim() || '';
+
+    // If both show exactly "0:00" or "0.0" etc., game is over
+    if ((whiteTime === '0:00' || whiteTime === '0.0') &&
+      (blackTime === '0:00' || blackTime === '0.0')) {
+      return true;
+    }
+  }
+
+  return false;
+}
+// ---- Observer for board changes ----
 function startObserver() {
   const target = document.querySelector('chess-board') || document.querySelector('.board') || document.body;
   const observer = new MutationObserver(() => scheduleUpdate(400));
@@ -621,7 +754,9 @@ function startObserver() {
 // ---- Init ----
 userColor = null;
 colorDetectionAttempts = 0;
+gameEndDetected = false;
 
 scheduleUpdate(1500);
 startObserver();
+startGameEndObserver();     // 👈 new: auto‑queue next game
 setInterval(() => scheduleUpdate(0), 3000);
