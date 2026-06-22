@@ -230,24 +230,17 @@ function humanMoveBonus(uci, fen) {
   const toFile = to[0];
   let bonus = 0;
 
-  // Castling — strongest bonus, handled separately but also weighted here
   if (isCastlingMove(uci)) bonus += 2.0;
 
-  // Center control in opening
   if (isOpeningMove(fen)) {
-    // Center pawn pushes and central squares
     if (['e4','d4','e5','d5','c4','c5'].includes(to)) bonus += 1.2;
-    // Knight development to natural squares
     if (['f3','c3','f6','c6','e2','d2','e7','d7'].includes(to)) bonus += 0.8;
-    // Bishop development
     if (['c4','f4','e3','d3','c5','f5','e6','d6','b5','g5','b4','g4'].includes(to)) bonus += 0.5;
   }
 
-  // Pawn pushes feel natural in middlegame
   const isPawnPush = from[0] === to[0] && !isCastlingMove(uci);
   if (isPawnPush) bonus += 0.2;
 
-  // Avoid moving to the board edge (a/h files, rank 1/8) unless castling
   if ((toFile === 'a' || toFile === 'h') && !isCastlingMove(uci)) bonus -= 0.3;
 
   return bonus;
@@ -270,10 +263,8 @@ function selectHumanMove(moves, fen) {
   const scores = moves.map(m => parseScore(m.score));
   const bestScore = scores[0];
 
-  // Forced mate — always play immediately
   if (moves[0].score?.startsWith('M') && bestScore > 50) return 0;
 
-  // ---- Castling: humans castle eagerly when it's safe ----
   for (let i = 0; i < moves.length; i++) {
     if (isCastlingMove(moves[i].uci) && bestScore - scores[i] <= 1.2) {
       if (Math.random() < 0.92) {
@@ -283,7 +274,6 @@ function selectHumanMove(moves, fen) {
     }
   }
 
-  // ---- Occasional blunder (4% chance) — realistic for amateur play ----
   if (Math.random() < 0.04) {
     for (let i = scores.length - 1; i >= 0; i--) {
       if (bestScore - scores[i] >= 2.5) {
@@ -293,10 +283,7 @@ function selectHumanMove(moves, fen) {
     }
   }
 
-  // ---- Weighted softmax with human move bonuses ----
-  // T = 1.5 feels like a ~800-1000 Elo player
   const T = 1.5;
-
   const adjustedScores = scores.map((s, i) => s + humanMoveBonus(moves[i].uci, fen));
   const expScores = adjustedScores.map(s => Math.exp((s + 1) / T));
   const totalExp = expScores.reduce((a, b) => a + b, 0);
@@ -782,7 +769,6 @@ async function doUpdate() {
   updateMovesDisplay([{ san: '…', score: '' }], -1);
   updateStatus(thinkingMessages[Math.floor(Math.random() * thinkingMessages.length)]);
 
-  // ★ Engine analysis: more multipv in opening for variety
   const pieces = countPieces(fen);
   const isEndgame = pieces <= 12;
   const isOpening = pieces > 28;
@@ -820,7 +806,7 @@ async function doUpdate() {
   });
 }
 
-// ---- Game‑end detection & manual "New Game" button ----
+// ---- Game‑end detection & auto‑queue ----
 function checkGameEnd() {
   const endSelectors = [
     '.game-over-modal', '[class*="game-over"]', '.post-game-modal',
@@ -859,49 +845,69 @@ function checkGameEnd() {
   return false;
 }
 
-function showNextGameButton() {
-  if (document.getElementById('monster-next-game-btn')) return;
+function actuallyStartNextGame() {
+  const buttons = document.querySelectorAll('button, a, span[role="button"]');
+  const targetTexts = ['10 min', '10+0', 'new 10', 'play again 10'];
 
-  const btn = document.createElement('button');
-  btn.id = 'monster-next-game-btn';
-  btn.textContent = '▶️ New 10‑min Game';
-  btn.title = 'Click to start a new 10‑minute game';
-  btn.style.cssText = `
-    position: fixed; bottom: 20px; left: 50%;
-    transform: translateX(-50%);
-    background: #4CAF50; color: white;
-    padding: 14px 28px; border: none; border-radius: 8px;
-    font-size: 18px; font-weight: bold;
-    cursor: pointer; z-index: 10000;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.4);
-    transition: background 0.2s;
-  `;
-  btn.onmouseenter = () => { btn.style.background = '#45a049'; };
-  btn.onmouseleave = () => { btn.style.background = '#4CAF50'; };
-  btn.onclick = () => {
-    btn.remove();
-    window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=rated';
-  };
-  document.body.appendChild(btn);
+  for (const btn of buttons) {
+    const text = btn.textContent?.toLowerCase() || '';
+    for (const t of targetTexts) {
+      if (text.includes(t)) {
+        console.log(`MonsterGambit: clicking "${btn.textContent.trim()}" to start next game`);
+        btn.click();
+        return;
+      }
+    }
+  }
+
+  for (const btn of buttons) {
+    const text = btn.textContent?.toLowerCase() || '';
+    if (text.includes('new game') || text.includes('play again')) {
+      console.log(`MonsterGambit: clicking "${btn.textContent.trim()}" as fallback`);
+      btn.click();
+      return;
+    }
+  }
+
+  console.log('MonsterGambit: no button found – navigating to 10+0 challenge');
+  window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=rated';
+}
+
+function tryStartNextGame() {
+  if (gameEndDetected) return;
+  gameEndDetected = true;
+
+  console.log('MonsterGambit: Game ended – looking for next game button…');
+
+  // 20% chance of taking a 2‑8 minute break
+  if (Math.random() < 0.20) {
+    const breakMinutes = 2 + Math.random() * 6;
+    console.log(`MonsterGambit: Taking a ${Math.round(breakMinutes)}min break…`);
+    updateStatus(`☕ Taking a break… next game in ~${Math.round(breakMinutes)}min`);
+    setTimeout(() => {
+      updateStatus(null);
+      actuallyStartNextGame();
+    }, breakMinutes * 60000);
+    return;
+  }
+
+  actuallyStartNextGame();
 }
 
 function resetGameEndDetection() {
   if (!gameEndDetected) return;
   const pieces = document.querySelectorAll('.piece');
   if (pieces.length >= 28) {
-    console.log('MonsterGambit: new game detected – resetting button flag');
+    console.log('MonsterGambit: new game detected – resetting auto-queue');
     gameEndDetected = false;
-    const oldBtn = document.getElementById('monster-next-game-btn');
-    if (oldBtn) oldBtn.remove();
   }
 }
 
 function startGameEndObserver() {
   const obs = new MutationObserver(() => {
     resetGameEndDetection();
-    if (!gameEndDetected && checkGameEnd()) {
-      gameEndDetected = true;
-      showNextGameButton();
+    if (checkGameEnd()) {
+      setTimeout(tryStartNextGame, 4000 + Math.random() * 3000);
     }
   });
   obs.observe(document.body, { childList: true, subtree: true, attributes: true });
