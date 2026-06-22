@@ -219,7 +219,41 @@ function isCastlingMove(uci) {
   return uci === 'e1g1' || uci === 'e1c1' || uci === 'e8g8' || uci === 'e8c8';
 }
 
-// ---- Humanized move selector (500 Elo) ----
+// ---- Human-like move patterns ----
+function isOpeningMove(fen) {
+  return countPieces(fen) > 28;
+}
+
+function humanMoveBonus(uci, fen) {
+  const from = uci.substring(0, 2);
+  const to   = uci.substring(2, 4);
+  const toFile = to[0];
+  let bonus = 0;
+
+  // Castling — strongest bonus, handled separately but also weighted here
+  if (isCastlingMove(uci)) bonus += 2.0;
+
+  // Center control in opening
+  if (isOpeningMove(fen)) {
+    // Center pawn pushes and central squares
+    if (['e4','d4','e5','d5','c4','c5'].includes(to)) bonus += 1.2;
+    // Knight development to natural squares
+    if (['f3','c3','f6','c6','e2','d2','e7','d7'].includes(to)) bonus += 0.8;
+    // Bishop development
+    if (['c4','f4','e3','d3','c5','f5','e6','d6','b5','g5','b4','g4'].includes(to)) bonus += 0.5;
+  }
+
+  // Pawn pushes feel natural in middlegame
+  const isPawnPush = from[0] === to[0] && !isCastlingMove(uci);
+  if (isPawnPush) bonus += 0.2;
+
+  // Avoid moving to the board edge (a/h files, rank 1/8) unless castling
+  if ((toFile === 'a' || toFile === 'h') && !isCastlingMove(uci)) bonus -= 0.3;
+
+  return bonus;
+}
+
+// ---- Humanized move selector (improved) ----
 function parseScore(scoreStr) {
   if (!scoreStr) return 0;
   if (scoreStr.startsWith('M')) {
@@ -232,40 +266,43 @@ function parseScore(scoreStr) {
 function selectHumanMove(moves, fen) {
   if (!moves || moves.length === 0) return -1;
   if (moves.length === 1) return 0;
+
   const scores = moves.map(m => parseScore(m.score));
   const bestScore = scores[0];
 
+  // Forced mate — always play immediately
   if (moves[0].score?.startsWith('M') && bestScore > 50) return 0;
 
+  // ---- Castling: humans castle eagerly when it's safe ----
   for (let i = 0; i < moves.length; i++) {
-    if (isCastlingMove(moves[i].uci) && bestScore - scores[i] <= 0.5) {
-      if (Math.random() < 0.70) {
+    if (isCastlingMove(moves[i].uci) && bestScore - scores[i] <= 1.2) {
+      if (Math.random() < 0.92) {
         console.log('🏰 Castling selected');
         return i;
       }
-      break;
     }
   }
 
-  if (Math.random() < 0.05) {
-    let blunderIdx = -1;
+  // ---- Occasional blunder (4% chance) — realistic for amateur play ----
+  if (Math.random() < 0.04) {
     for (let i = scores.length - 1; i >= 0; i--) {
-      if (bestScore - scores[i] >= 3.0) {
-        blunderIdx = i;
-        break;
+      if (bestScore - scores[i] >= 2.5) {
+        console.log('🤦 Intentional blunder');
+        return i;
       }
     }
-    if (blunderIdx !== -1) {
-      console.log('🤦 Intentional blunder!');
-      return blunderIdx;
-    }
   }
 
-  const T = 2.5;
-  const expScores = scores.map(s => Math.exp((s + 1) / T));
+  // ---- Weighted softmax with human move bonuses ----
+  // T = 1.5 feels like a ~800-1000 Elo player
+  const T = 1.5;
+
+  const adjustedScores = scores.map((s, i) => s + humanMoveBonus(moves[i].uci, fen));
+  const expScores = adjustedScores.map(s => Math.exp((s + 1) / T));
   const totalExp = expScores.reduce((a, b) => a + b, 0);
+
   let rand = Math.random() * totalExp;
-  for (let i = 0; i < scores.length; i++) {
+  for (let i = 0; i < expScores.length; i++) {
     rand -= expScores[i];
     if (rand <= 0) return i;
   }
@@ -487,7 +524,7 @@ async function idleMouseMovement() {
   }
 }
 
-// ★ FIX 1: Reliable move execution with FEN verification
+// ★ Reliable move execution with FEN verification
 async function playMove(uci, displayText) {
   const from = uci.substring(0, 2);
   const to = uci.substring(2, 4);
@@ -745,10 +782,12 @@ async function doUpdate() {
   updateMovesDisplay([{ san: '…', score: '' }], -1);
   updateStatus(thinkingMessages[Math.floor(Math.random() * thinkingMessages.length)]);
 
+  // ★ Engine analysis: more multipv in opening for variety
   const pieces = countPieces(fen);
   const isEndgame = pieces <= 12;
+  const isOpening = pieces > 28;
   const analysisTime = isEndgame ? 0.3 : 0.5;
-  const multipv = isEndgame ? 1 : 3;
+  const multipv = isOpening ? 5 : 3;
 
   chrome.runtime.sendMessage({ type: 'getMove', fen, time: analysisTime, multipv }, (response) => {
     resetRequestFlag();
@@ -841,7 +880,7 @@ function showNextGameButton() {
   btn.onmouseleave = () => { btn.style.background = '#4CAF50'; };
   btn.onclick = () => {
     btn.remove();
-    window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=unrated';
+    window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=rated';
   };
   document.body.appendChild(btn);
 }
@@ -868,7 +907,7 @@ function startGameEndObserver() {
   obs.observe(document.body, { childList: true, subtree: true, attributes: true });
 }
 
-// ★ FIX 2: Scoped observer without double-fire
+// ★ Scoped observer without double-fire
 function ensureObserver() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
   const target = board || document.body;
