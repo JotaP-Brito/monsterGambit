@@ -19,7 +19,7 @@ let debounceTimer = null;
 let gameEndDetected = false;
 let observer = null;
 let lastForcedCheck = 0;
-let isPlayingMove = false;      // true while a drag/click move is in progress
+let isPlayingMove = false;
 
 // ---- Board orientation ----
 function isFlipped() {
@@ -214,6 +214,11 @@ function getFEN() {
   return fen;
 }
 
+// ---- Helper: detect castling moves ----
+function isCastlingMove(uci) {
+  return uci === 'e1g1' || uci === 'e1c1' || uci === 'e8g8' || uci === 'e8c8';
+}
+
 // ---- Humanized move selector (500 Elo) ----
 function parseScore(scoreStr) {
   if (!scoreStr) return 0;
@@ -229,7 +234,20 @@ function selectHumanMove(moves, fen) {
   if (moves.length === 1) return 0;
   const scores = moves.map(m => parseScore(m.score));
   const bestScore = scores[0];
+
+  // Forced mate? Always play it
   if (moves[0].score?.startsWith('M') && bestScore > 50) return 0;
+
+  // ★ Heavily prefer castling if it's within 0.5 pawns of the best move
+  for (let i = 0; i < moves.length; i++) {
+    if (isCastlingMove(moves[i].uci) && bestScore - scores[i] <= 0.5) {
+      if (Math.random() < 0.70) {
+        console.log('🏰 Castling selected');
+        return i;
+      }
+      break; // only consider the first castling option
+    }
+  }
 
   // 5% blunder chance
   if (Math.random() < 0.05) {
@@ -246,6 +264,7 @@ function selectHumanMove(moves, fen) {
     }
   }
 
+  // Softmax with temperature
   const T = 2.5;
   const expScores = scores.map(s => Math.exp((s + 1) / T));
   const totalExp = expScores.reduce((a, b) => a + b, 0);
@@ -257,19 +276,23 @@ function selectHumanMove(moves, fen) {
   return 0;
 }
 
-// ---- Thinking time (improved endgame) ----
+// ---- Thinking time (varied) ----
 function countPieces(fen) { return fen.split(' ')[0].replace(/[\/0-9]/g, '').length; }
 
 function computeThinkTime(fen, evaluationScore) {
   const pieces = countPieces(fen);
   const isEndgame = pieces <= 12;
 
-  // Quick-move chance is higher in endgames (simpler decisions)
+  // Occasional instant move (5%) – like a premove
+  if (Math.random() < 0.05) return 100 + Math.random() * 300;
+
+  // Occasional very long think (3%) – like the player went AFK
+  if (Math.random() < 0.03) return 15000 + Math.random() * 30000;
+
   if (Math.random() < (isEndgame ? 0.30 : 0.15)) {
     return 300 + Math.random() * 400;
   }
 
-  // Long "think" pauses are rare in endgames — fewer genuine decision points
   if (!isEndgame && Math.random() < 0.05) {
     return 8000 + Math.random() * 7000;
   }
@@ -277,7 +300,7 @@ function computeThinkTime(fen, evaluationScore) {
   let baseMin, baseMax;
   if (pieces > 28)      { baseMin = 1.0; baseMax = 4.0; }
   else if (pieces > 12) { baseMin = 2.0; baseMax = 10.0; }
-  else                  { baseMin = 0.5; baseMax = 2.5; }  // endgame: much tighter range
+  else                  { baseMin = 0.5; baseMax = 2.5; }
 
   if (evaluationScore <= -2.0 && !isEndgame) {
     baseMin += 2;
@@ -344,7 +367,6 @@ async function tryDragMove(from, to) {
   const piece = document.elementFromPoint(fromPos.x, fromPos.y);
   if (!piece) return false;
 
-  // Validate piece colour
   const classes = [...piece.classList];
   const pieceClass = classes.find(c => pieceMap[c]);
   if (pieceClass) {
@@ -355,10 +377,55 @@ async function tryDragMove(from, to) {
     }
   }
 
-  // 1. Hover over the piece for a human‑like pause (300‑700ms)
+  // ---- False start: 10% chance to pick up a DIFFERENT piece first ----
+  if (Math.random() < 0.10) {
+    const allMyPieces = [...document.querySelectorAll('.piece')].filter(p => {
+      const pc = [...p.classList].find(c => pieceMap[c]);
+      return pc && (pieceMap[pc] === pieceMap[pc].toUpperCase() ? 'w' : 'b') === userColor;
+    });
+    if (allMyPieces.length > 1) {
+      const wrongPiece = allMyPieces[Math.floor(Math.random() * allMyPieces.length)];
+      if (wrongPiece !== piece) {
+        console.log('🤔 Hesitation: grabbed wrong piece first');
+        const wrongRect = wrongPiece.getBoundingClientRect();
+        const wrongX = wrongRect.left + wrongRect.width / 2;
+        const wrongY = wrongRect.top + wrongRect.height / 2;
+
+        document.dispatchEvent(new PointerEvent('pointermove', {
+          bubbles: true, cancelable: true, view: window,
+          clientX: wrongX, clientY: wrongY,
+          button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+        }));
+        await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
+
+        wrongPiece.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true, cancelable: true, view: window,
+          clientX: wrongX, clientY: wrongY,
+          button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+        }));
+        await new Promise(r => setTimeout(r, 150 + Math.random() * 300));
+
+        wrongPiece.dispatchEvent(new PointerEvent('pointerup', {
+          bubbles: true, cancelable: true, view: window,
+          clientX: wrongX, clientY: wrongY,
+          button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+        }));
+        await new Promise(r => setTimeout(r, 300 + Math.random() * 500));
+
+        document.dispatchEvent(new PointerEvent('pointermove', {
+          bubbles: true, cancelable: true, view: window,
+          clientX: fromPos.x, clientY: fromPos.y,
+          button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+        }));
+        await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+      }
+    }
+  }
+
+  // 1. Hover over the piece (300‑700ms)
   await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
 
-  // 2. Wiggle the mouse a bit before grabbing (50% chance)
+  // 2. Wiggle (50% chance)
   if (Math.random() < 0.5) {
     const wiggleX = fromPos.x + (Math.random() - 0.5) * 15;
     const wiggleY = fromPos.y + (Math.random() - 0.5) * 15;
@@ -370,17 +437,16 @@ async function tryDragMove(from, to) {
     await new Promise(r => setTimeout(r, 60 + Math.random() * 120));
   }
 
-  // 3. Pick up the piece
+  // 3. Pick up
   piece.dispatchEvent(new PointerEvent('pointerdown', {
     bubbles: true, cancelable: true, view: window,
     clientX: fromPos.x, clientY: fromPos.y,
     button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
 
-  // 4. Drag to the target square (with a small mid‑drag pause sometimes)
   await new Promise(r => setTimeout(r, 60 + Math.random() * 120));
 
-  // Occasionally (20%) stop mid‑drag for a fraction of a second
+  // 4. Mid‑drag pause (20%)
   if (Math.random() < 0.2) {
     await new Promise(r => setTimeout(r, 100 + Math.random() * 200));
   }
@@ -392,10 +458,9 @@ async function tryDragMove(from, to) {
     button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
 
-  // 5. Pause before releasing (like double‑checking the move)
   await new Promise(r => setTimeout(r, 50 + Math.random() * 150));
 
-  // 6. Release the piece
+  // 5. Release
   targetEl.dispatchEvent(new PointerEvent('pointerup', {
     bubbles: true, cancelable: true, view: window,
     clientX: toPos.x, clientY: toPos.y,
@@ -405,24 +470,57 @@ async function tryDragMove(from, to) {
   return true;
 }
 
+async function idleMouseMovement() {
+  const pieces = [...document.querySelectorAll('.piece')];
+  if (pieces.length === 0) return;
+
+  const randomPiece = pieces[Math.floor(Math.random() * pieces.length)];
+  const rect = randomPiece.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+
+  document.dispatchEvent(new PointerEvent('pointermove', {
+    bubbles: true, cancelable: true, view: window,
+    clientX: x, clientY: y,
+    button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+  }));
+
+  await new Promise(r => setTimeout(r, 400 + Math.random() * 800));
+
+  const boardEl = document.querySelector('chess-board') || document.querySelector('.board');
+  if (boardEl) {
+    const boardRect = boardEl.getBoundingClientRect();
+    const randX = boardRect.left + Math.random() * boardRect.width;
+    const randY = boardRect.top + Math.random() * boardRect.height;
+    document.dispatchEvent(new PointerEvent('pointermove', {
+      bubbles: true, cancelable: true, view: window,
+      clientX: randX, clientY: randY,
+      button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+    }));
+  }
+}
+
 async function playMove(uci, displayText) {
   const from = uci.substring(0, 2);
   const to = uci.substring(2, 4);
   console.log(`MonsterGambit: playing ${from}→${to} (user is ${userColor})`);
   updateStatus(`Playing ${displayText || uci}…`);
 
-  isPlayingMove = true;   // <-- lock updates while moving
+  isPlayingMove = true;
 
   if (await tryBoardAPI(from, to)) {
     console.log('Move via board API');
     setTimeout(() => updateStatus(null), 2000);
     isPlayingMove = false;
+    // 10% chance to move mouse idly after playing
+    if (Math.random() < 0.10) idleMouseMovement();
     return;
   }
   if (await tryTextInput(from, to)) {
     console.log('Move via text input');
     setTimeout(() => updateStatus(null), 2000);
     isPlayingMove = false;
+    if (Math.random() < 0.10) idleMouseMovement();
     return;
   }
   console.log('Fallback to drag simulation');
@@ -444,7 +542,10 @@ async function playMove(uci, displayText) {
     await tryBoardAPI(from, to);
   }
   setTimeout(() => updateStatus(null), 2000);
-  isPlayingMove = false;  // <-- unlock after move finishes
+  isPlayingMove = false;
+
+  // 10% chance to move mouse idly after playing
+  if (Math.random() < 0.10) idleMouseMovement();
 }
 
 function updateStatus(msg) {
@@ -599,7 +700,7 @@ function updateMovesDisplay(moves, chosenIndex) {
   }
 }
 
-// ---- Debounced update with stuck‑request recovery ----
+// ---- Debounced update ----
 function scheduleUpdate(delay = 400) {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(doUpdate, delay);
@@ -617,16 +718,11 @@ function resetRequestFlag() {
 }
 
 async function doUpdate() {
-  // If a move is currently being physically played, don't interfere
   if (isPlayingMove) return;
 
-  // If we already have a move scheduled and the position hasn't changed, do nothing
   if (autoPlayTimeout && selectedMove && lastFEN) {
     const currentFen = getFEN();
-    if (currentFen === lastFEN) {
-      // Still waiting to execute the previously scheduled move – skip update
-      return;
-    }
+    if (currentFen === lastFEN) return;
   }
 
   if (requestInFlight) {
@@ -640,7 +736,6 @@ async function doUpdate() {
   let fen;
   try { fen = getFEN(); } catch (e) { console.error('MonsterGambit getFEN error:', e); return; }
 
-  // Only force update if we DON'T already have a move scheduled
   const now = Date.now();
   const forceUpdate = (now - lastForcedCheck > 5000) && !autoPlayTimeout && isUserTurn();
 
@@ -654,7 +749,6 @@ async function doUpdate() {
   const previousFEN = lastFEN;
   lastFEN = fen;
 
-  // Only cancel pending auto-play if the position actually changed (opponent moved)
   if (autoPlayTimeout && previousFEN && fen !== previousFEN) {
     cancelAutoPlay('Position changed');
   }
@@ -673,7 +767,7 @@ async function doUpdate() {
   const pieces = countPieces(fen);
   const isEndgame = pieces <= 12;
   const analysisTime = isEndgame ? 0.3 : 0.5;
-  const multipv = isEndgame ? 1 : 3;   // fewer lines in endgame = faster
+  const multipv = isEndgame ? 1 : 3;
 
   chrome.runtime.sendMessage({ type: 'getMove', fen, time: analysisTime, multipv }, (response) => {
     resetRequestFlag();
@@ -745,12 +839,7 @@ function checkGameEnd() {
   return false;
 }
 
-function tryStartNextGame() {
-  if (gameEndDetected) return;
-  gameEndDetected = true;
-
-  console.log('MonsterGambit: Game ended – looking for next game button…');
-
+function actuallyStartNextGame() {
   const buttons = document.querySelectorAll('button, a, span[role="button"]');
   const targetTexts = ['10 min', '10+0', 'new 10', 'play again 10'];
 
@@ -774,8 +863,29 @@ function tryStartNextGame() {
     }
   }
 
-  //console.log('MonsterGambit: no button found – navigating to 10+0 challenge');
-  //window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=rated';
+  console.log('MonsterGambit: no button found – navigating to 10+0 challenge');
+  window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=unrated';
+}
+
+function tryStartNextGame() {
+  if (gameEndDetected) return;
+  gameEndDetected = true;
+
+  console.log('MonsterGambit: Game ended – looking for next game button…');
+
+  // 20% chance of taking a 2‑8 minute break
+  if (Math.random() < 0.20) {
+    const breakMinutes = 2 + Math.random() * 6;
+    console.log(`MonsterGambit: Taking a ${Math.round(breakMinutes)}min break…`);
+    updateStatus(`☕ Taking a break… next game in ~${Math.round(breakMinutes)}min`);
+    setTimeout(() => {
+      updateStatus(null);
+      actuallyStartNextGame();
+    }, breakMinutes * 60000);
+    return;
+  }
+
+  actuallyStartNextGame();
 }
 
 function resetGameEndDetection() {
@@ -822,12 +932,10 @@ scheduleUpdate(1500);
 ensureObserver();
 startGameEndObserver();
 
-// Reconnect observer every 10 seconds
 setInterval(() => {
   ensureObserver();
 }, 10000);
 
-// Polling fallback every 3 seconds
 setInterval(() => {
   scheduleUpdate(0);
 }, 3000);
