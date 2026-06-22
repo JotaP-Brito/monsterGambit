@@ -235,21 +235,18 @@ function selectHumanMove(moves, fen) {
   const scores = moves.map(m => parseScore(m.score));
   const bestScore = scores[0];
 
-  // Forced mate? Always play it
   if (moves[0].score?.startsWith('M') && bestScore > 50) return 0;
 
-  // ★ Heavily prefer castling if it's within 0.5 pawns of the best move
   for (let i = 0; i < moves.length; i++) {
     if (isCastlingMove(moves[i].uci) && bestScore - scores[i] <= 0.5) {
       if (Math.random() < 0.70) {
         console.log('🏰 Castling selected');
         return i;
       }
-      break; // only consider the first castling option
+      break;
     }
   }
 
-  // 5% blunder chance
   if (Math.random() < 0.05) {
     let blunderIdx = -1;
     for (let i = scores.length - 1; i >= 0; i--) {
@@ -264,7 +261,6 @@ function selectHumanMove(moves, fen) {
     }
   }
 
-  // Softmax with temperature
   const T = 2.5;
   const expScores = scores.map(s => Math.exp((s + 1) / T));
   const totalExp = expScores.reduce((a, b) => a + b, 0);
@@ -283,10 +279,7 @@ function computeThinkTime(fen, evaluationScore) {
   const pieces = countPieces(fen);
   const isEndgame = pieces <= 12;
 
-  // Occasional instant move (5%) – like a premove
   if (Math.random() < 0.05) return 100 + Math.random() * 300;
-
-  // Occasional very long think (3%) – like the player went AFK
   if (Math.random() < 0.03) return 15000 + Math.random() * 30000;
 
   if (Math.random() < (isEndgame ? 0.30 : 0.15)) {
@@ -310,7 +303,7 @@ function computeThinkTime(fen, evaluationScore) {
   return Math.round((baseMin + Math.random() * (baseMax - baseMin)) * 1000);
 }
 
-// ---- Move execution ----
+// ---- Move execution helpers ----
 function getSquareCenter(square) {
   const file = square.charCodeAt(0) - 97;
   const rank = 8 - parseInt(square[1]);
@@ -377,7 +370,6 @@ async function tryDragMove(from, to) {
     }
   }
 
-  // ---- False start: 10% chance to pick up a DIFFERENT piece first ----
   if (Math.random() < 0.10) {
     const allMyPieces = [...document.querySelectorAll('.piece')].filter(p => {
       const pc = [...p.classList].find(c => pieceMap[c]);
@@ -422,10 +414,8 @@ async function tryDragMove(from, to) {
     }
   }
 
-  // 1. Hover over the piece (300‑700ms)
   await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
 
-  // 2. Wiggle (50% chance)
   if (Math.random() < 0.5) {
     const wiggleX = fromPos.x + (Math.random() - 0.5) * 15;
     const wiggleY = fromPos.y + (Math.random() - 0.5) * 15;
@@ -437,7 +427,6 @@ async function tryDragMove(from, to) {
     await new Promise(r => setTimeout(r, 60 + Math.random() * 120));
   }
 
-  // 3. Pick up
   piece.dispatchEvent(new PointerEvent('pointerdown', {
     bubbles: true, cancelable: true, view: window,
     clientX: fromPos.x, clientY: fromPos.y,
@@ -446,7 +435,6 @@ async function tryDragMove(from, to) {
 
   await new Promise(r => setTimeout(r, 60 + Math.random() * 120));
 
-  // 4. Mid‑drag pause (20%)
   if (Math.random() < 0.2) {
     await new Promise(r => setTimeout(r, 100 + Math.random() * 200));
   }
@@ -460,7 +448,6 @@ async function tryDragMove(from, to) {
 
   await new Promise(r => setTimeout(r, 50 + Math.random() * 150));
 
-  // 5. Release
   targetEl.dispatchEvent(new PointerEvent('pointerup', {
     bubbles: true, cancelable: true, view: window,
     clientX: toPos.x, clientY: toPos.y,
@@ -500,52 +487,46 @@ async function idleMouseMovement() {
   }
 }
 
+// ★ FIX 1: Reliable move execution with FEN verification
 async function playMove(uci, displayText) {
   const from = uci.substring(0, 2);
   const to = uci.substring(2, 4);
   console.log(`MonsterGambit: playing ${from}→${to} (user is ${userColor})`);
   updateStatus(`Playing ${displayText || uci}…`);
-
   isPlayingMove = true;
 
-  if (await tryBoardAPI(from, to)) {
-    console.log('Move via board API');
-    setTimeout(() => updateStatus(null), 2000);
-    isPlayingMove = false;
-    // 10% chance to move mouse idly after playing
-    if (Math.random() < 0.10) idleMouseMovement();
-    return;
-  }
-  if (await tryTextInput(from, to)) {
-    console.log('Move via text input');
-    setTimeout(() => updateStatus(null), 2000);
-    isPlayingMove = false;
-    if (Math.random() < 0.10) idleMouseMovement();
-    return;
-  }
-  console.log('Fallback to drag simulation');
+  const fenBefore = getFEN();
 
-  // Random mental pause before moving (0‑1.5s)
-  await new Promise(r => setTimeout(r, Math.random() * 1500));
+  const methods = [
+    { name: 'board API', fn: () => tryBoardAPI(from, to) },
+    { name: 'text input', fn: () => tryTextInput(from, to) },
+    { name: 'drag',       fn: () => tryDragMove(from, to) },
+  ];
 
-  const dragSuccess = await tryDragMove(from, to);
-  if (!dragSuccess) {
-    updateStatus('❌ Invalid move (wrong piece color)');
-    setTimeout(() => updateStatus(null), 3000);
-    isPlayingMove = false;
-    return;
+  for (const method of methods) {
+    try {
+      const attempted = await method.fn();
+      if (!attempted) continue;
+
+      await new Promise(r => setTimeout(r, 400));
+      const fenAfter = getFEN();
+
+      if (fenAfter !== fenBefore) {
+        console.log(`Move registered via ${method.name}`);
+        setTimeout(() => updateStatus(null), 2000);
+        isPlayingMove = false;
+        if (Math.random() < 0.10) idleMouseMovement();
+        return;
+      }
+      console.warn(`${method.name} appeared to succeed but FEN unchanged — trying next method`);
+    } catch (e) {
+      console.warn(`${method.name} threw:`, e);
+    }
   }
-  await new Promise(r => setTimeout(r, 500));
-  const newFEN = getFEN();
-  if (newFEN === lastFEN) {
-    console.warn('Move not registered after drag, retrying board API…');
-    await tryBoardAPI(from, to);
-  }
-  setTimeout(() => updateStatus(null), 2000);
+
+  console.error('MonsterGambit: all move methods failed');
+  updateStatus('❌ Move failed — click 🔄 to retry');
   isPlayingMove = false;
-
-  // 10% chance to move mouse idly after playing
-  if (Math.random() < 0.10) idleMouseMovement();
 }
 
 function updateStatus(msg) {
@@ -800,7 +781,7 @@ async function doUpdate() {
   });
 }
 
-// ---- Game‑end detection & auto‑queue ----
+// ---- Game‑end detection & manual "New Game" button ----
 function checkGameEnd() {
   const endSelectors = [
     '.game-over-modal', '[class*="game-over"]', '.post-game-modal',
@@ -839,88 +820,78 @@ function checkGameEnd() {
   return false;
 }
 
-function actuallyStartNextGame() {
-  const buttons = document.querySelectorAll('button, a, span[role="button"]');
-  const targetTexts = ['10 min', '10+0', 'new 10', 'play again 10'];
+function showNextGameButton() {
+  if (document.getElementById('monster-next-game-btn')) return;
 
-  for (const btn of buttons) {
-    const text = btn.textContent?.toLowerCase() || '';
-    for (const t of targetTexts) {
-      if (text.includes(t)) {
-        console.log(`MonsterGambit: clicking "${btn.textContent.trim()}" to start next game`);
-        btn.click();
-        return;
-      }
-    }
-  }
-
-  for (const btn of buttons) {
-    const text = btn.textContent?.toLowerCase() || '';
-    if (text.includes('new game') || text.includes('play again')) {
-      console.log(`MonsterGambit: clicking "${btn.textContent.trim()}" as fallback`);
-      btn.click();
-      return;
-    }
-  }
-
-  console.log('MonsterGambit: no button found – navigating to 10+0 challenge');
-  window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=unrated';
-}
-
-function tryStartNextGame() {
-  if (gameEndDetected) return;
-  gameEndDetected = true;
-
-  console.log('MonsterGambit: Game ended – looking for next game button…');
-
-  // 20% chance of taking a 2‑8 minute break
-  if (Math.random() < 0.20) {
-    const breakMinutes = 2 + Math.random() * 6;
-    console.log(`MonsterGambit: Taking a ${Math.round(breakMinutes)}min break…`);
-    updateStatus(`☕ Taking a break… next game in ~${Math.round(breakMinutes)}min`);
-    setTimeout(() => {
-      updateStatus(null);
-      actuallyStartNextGame();
-    }, breakMinutes * 60000);
-    return;
-  }
-
-  actuallyStartNextGame();
+  const btn = document.createElement('button');
+  btn.id = 'monster-next-game-btn';
+  btn.textContent = '▶️ New 10‑min Game';
+  btn.title = 'Click to start a new 10‑minute game';
+  btn.style.cssText = `
+    position: fixed; bottom: 20px; left: 50%;
+    transform: translateX(-50%);
+    background: #4CAF50; color: white;
+    padding: 14px 28px; border: none; border-radius: 8px;
+    font-size: 18px; font-weight: bold;
+    cursor: pointer; z-index: 10000;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+    transition: background 0.2s;
+  `;
+  btn.onmouseenter = () => { btn.style.background = '#45a049'; };
+  btn.onmouseleave = () => { btn.style.background = '#4CAF50'; };
+  btn.onclick = () => {
+    btn.remove();
+    window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=unrated';
+  };
+  document.body.appendChild(btn);
 }
 
 function resetGameEndDetection() {
   if (!gameEndDetected) return;
   const pieces = document.querySelectorAll('.piece');
   if (pieces.length >= 28) {
-    console.log('MonsterGambit: new game detected – resetting auto-queue');
+    console.log('MonsterGambit: new game detected – resetting button flag');
     gameEndDetected = false;
+    const oldBtn = document.getElementById('monster-next-game-btn');
+    if (oldBtn) oldBtn.remove();
   }
 }
 
 function startGameEndObserver() {
   const obs = new MutationObserver(() => {
     resetGameEndDetection();
-    if (checkGameEnd()) {
-      setTimeout(tryStartNextGame, 4000 + Math.random() * 3000);
+    if (!gameEndDetected && checkGameEnd()) {
+      gameEndDetected = true;
+      showNextGameButton();
     }
   });
   obs.observe(document.body, { childList: true, subtree: true, attributes: true });
 }
 
-// ---- Observer for board changes ----
+// ★ FIX 2: Scoped observer without double-fire
 function ensureObserver() {
-  const target = document.querySelector('chess-board') || document.querySelector('.board') || document.body;
-  if (!target) return;
+  const board = document.querySelector('chess-board') || document.querySelector('.board');
+  const target = board || document.body;
+  const isBody = !board;
 
-  if (observer) {
-    observer.disconnect();
+  if (isBody) {
+    console.warn('MonsterGambit: board element not found, observing body (degraded mode)');
   }
+
+  if (observer) observer.disconnect();
+
   observer = new MutationObserver(() => {
     scheduleUpdate(400);
-    setTimeout(() => scheduleUpdate(0), 600);
   });
-  observer.observe(target, { childList: true, subtree: true, attributes: true });
-  console.log('MonsterGambit: observer attached to', target.tagName || 'body');
+
+  observer.observe(target, {
+    childList: true,
+    subtree: true,
+    attributes: isBody ? false : true,
+    attributeFilter: isBody ? undefined : ['class', 'style'],
+  });
+
+  console.log(`MonsterGambit: observer attached to ${target.tagName}`);
 }
 
 // ---- Init ----
