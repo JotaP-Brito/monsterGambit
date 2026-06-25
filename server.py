@@ -273,11 +273,48 @@ def bestmove():
 def health():
     return "OK", 200
 
-if __name__ == "__main__":
-    start_engine()
-    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
-
-# new engine improvemnt
-#mitens
-#luna
-#trick chess.com
+while True:
+    # 1. Wait until it's our turn (detect opponent's move or initial position)
+    #    We can detect turn by checking if the clock on our side is running, 
+    #    or by comparing screenshots for changes.
+    #    Simplest: after we move, start a loop that periodically takes screenshots
+    #    and checks if the board changed (opponent moved). Or use OCR on the clock.
+    
+    # For demo, assume we have a function opponent_moved() that returns True when they moved.
+    
+    # 2. Update board with opponent's move
+    if new_move:
+        board.push(new_move)
+    
+    # 3. Get FEN, ask Stockfish, select a move
+    fen = board.fen()
+    moves = get_top_moves(fen, time=0.5, multipv=3)
+    chosen_move = select_human_move(moves, fen)
+    
+    # 4. Compute thinking time (your existing compute_think_time)
+    think_ms = compute_think_time(fen, parse_score(chosen_move.score))
+    
+    # 5. During thinking, we can move the mouse around (do this in a separate thread)
+    #    We'll sleep for think_ms minus some preparation time, then execute.
+    
+    # 6. Execute the move with mouse
+    from_sq = chess.SQUARE_NAMES[chosen_move.from_square]  # e.g. "e2"
+    to_sq   = chess.SQUARE_NAMES[chosen_move.to_square]    # "e4"
+    # Convert square names to screen coordinates (based on board rect)
+    from_pos = get_square_center(from_sq)
+    to_pos   = get_square_center(to_sq)
+    
+    # Pre-move hesitation: sometimes wiggle, pick up wrong piece, etc.
+    # Then:
+    mouse.position = (random x near from_pos)
+    time.sleep(random.uniform(0.1, 0.3))
+    mouse.press(Button.left)
+    human_move_to(to_pos[0], to_pos[1], duration=random.uniform(0.2, 0.5))
+    mouse.release(Button.left)
+    
+    # 7. Push your move to internal board
+    board.push(chosen_move)
+    
+    # 8. Add occasional idle (tab out, etc.)
+    if random.random() < 0.02:  # 2% chance
+        simulate_alt_tab()
