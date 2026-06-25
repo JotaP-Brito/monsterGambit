@@ -15,6 +15,19 @@ STOCKFISH_PATH = "./engines/stockfish/stockfish-windows-x86-64-avx2.exe"
 engine = None
 engine_lock = threading.Lock()
 engine_start_lock = threading.Lock()
+engine = chess.engine.SimpleEngine.popen_uci("stockfish_path")
+board = chess.Board()  # will be updated
+
+def get_top_moves(fen, time=0.5, multipv=3):
+    engine.configure({"MultiPV": multipv})
+    board.set_fen(fen)
+    limit = chess.engine.Limit(time=time)
+    result = engine.analyse(board, limit, multipv=multipv)
+    moves = []
+    for pv in result:
+        if pv["multipv"] == 1: score = pv["score"].white()  # from white's perspective
+        # ... extract pv[0] move, format san, score
+    return moves
 
 def locate_board(screen_img):
     # Load a template of a white square (captured from your own screen)
