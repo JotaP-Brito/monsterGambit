@@ -45,6 +45,13 @@ def get_piece_in_square(square_img, templates):
         return None  # empty
     return best_match  # e.g. "wP", "bK"
 
+board_matrix = [[None]*8 for _ in range(8)]
+# For each row y (0=top, 7=bottom in image), for each col x
+# If board is not flipped: row 7 is rank 1.
+# But it's easier: after detection, we map to standard chess coordinates.
+
+# Let's define a function to map pixel square (file, rank) to board index.
+
 def kill_engine():
     global engine
     if engine and engine.poll() is None:
