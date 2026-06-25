@@ -8,6 +8,11 @@ import numpy as np
 import mss
 import chess
 import chess.engine
+import math
+import random
+from pynput.mouse import Controller, Button
+import time
+
 
 app = Flask(__name__)
 STOCKFISH_PATH = "./engines/stockfish/stockfish-windows-x86-64-avx2.exe"
@@ -17,6 +22,37 @@ engine_lock = threading.Lock()
 engine_start_lock = threading.Lock()
 engine = chess.engine.SimpleEngine.popen_uci("stockfish_path")
 board = chess.Board()  # will be updated
+
+mouse = Controller()
+
+def bezier_curve(p0, p1, p2, t):
+    # Quadratic Bezier
+    x = (1-t)**2 * p0[0] + 2*(1-t)*t * p1[0] + t**2 * p2[0]
+    y = (1-t)**2 * p0[1] + 2*(1-t)*t * p1[1] + t**2 * p2[1]
+    return (x, y)
+
+def human_move_to(x, y, duration=0.5, overshoot=False):
+    start = mouse.position
+    # Random control point offset
+    cp_x = (start[0] + x) / 2 + random.randint(-100, 100)
+    cp_y = (start[1] + y) / 2 + random.randint(-100, 100)
+    
+    steps = int(duration * 60)  # 60 fps
+    for i in range(steps+1):
+        t = i / steps
+        # Ease in-out
+        t_eased = t * t * (3 - 2*t)  # smoothstep
+        pos = bezier_curve(start, (cp_x, cp_y), (x, y), t_eased)
+        mouse.position = pos
+        time.sleep(duration / steps)
+    
+    # Optional: overshoot
+    if overshoot and random.random() < 0.3:
+        overshoot_x = x + (x - start[0]) * 0.1 * random.uniform(0.5, 1.5)
+        overshoot_y = y + (y - start[1]) * 0.1 * random.uniform(0.5, 1.5)
+        mouse.position = (overshoot_x, overshoot_y)
+        time.sleep(0.05)
+        mouse.position = (x, y)
 
 def get_top_moves(fen, time=0.5, multipv=3):
     engine.configure({"MultiPV": multipv})
