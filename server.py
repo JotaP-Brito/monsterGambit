@@ -3,6 +3,9 @@ import subprocess
 import chess
 import threading
 import re
+import cv2
+import numpy as np
+import mss
 
 app = Flask(__name__)
 STOCKFISH_PATH = "./engines/stockfish/stockfish-windows-x86-64-avx2.exe"
@@ -10,6 +13,37 @@ STOCKFISH_PATH = "./engines/stockfish/stockfish-windows-x86-64-avx2.exe"
 engine = None
 engine_lock = threading.Lock()
 engine_start_lock = threading.Lock()
+
+def locate_board(screen_img):
+    # Load a template of a white square (captured from your own screen)
+    template = cv2.imread('white_square_template.png', 0)
+    w, h = template.shape[::-1]
+    
+    gray = cv2.cvtColor(screen_img, cv2.COLOR_BGR2GRAY)
+    res = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+    top_left = max_loc  # (x, y)
+    
+    # Now we need the board size. We can assume it's 8*square_size.
+    # Or find the bottom-right by matching another corner.
+    # For simplicity, you can measure square_size once.
+    square_size = 92  # example for 1920x1080
+    board_rect = (top_left[0], top_left[1], 8*square_size, 8*square_size)
+    return board_rect
+
+def get_piece_in_square(square_img, templates):
+    best_match = None
+    best_val = -1
+    gray_sq = cv2.cvtColor(square_img, cv2.COLOR_BGR2GRAY)
+    for name, tpl in templates.items():
+        res = cv2.matchTemplate(gray_sq, tpl, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
+        if max_val > best_val:
+            best_val = max_val
+            best_match = name
+    if best_val < 0.7:  # threshold
+        return None  # empty
+    return best_match  # e.g. "wP", "bK"
 
 def kill_engine():
     global engine

@@ -869,8 +869,7 @@ function actuallyStartNextGame() {
     }
   }
 
-  console.log('MonsterGambit: no button found – navigating to 10+0 challenge');
-  window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=rated';
+  
 }
 
 function tryStartNextGame() {
